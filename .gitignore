@@ -1,0 +1,14 @@
+out.*
+err.*
+*.out
+*.err
+*.stats
+__pycache__/
+.nfs*
+*.ncu-rep
+build/
+*.so
+*env
+results*
+models/
+test/

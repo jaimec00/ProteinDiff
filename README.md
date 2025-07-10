@@ -1,6 +1,6 @@
-#ProteinDiff - Graph-Conditioned Latent Diffusion (work in progress)
+# ProteinDiff - Graph-Conditioned Latent Diffusion (work in progress)
 
-##summary
+## summary
 
 this is my last attempt at beating protein mpnn, for now...
 
@@ -41,9 +41,7 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
             
                 - Communication between Latent, Nodes, and Edges
                     
-                    - thinking of first having the latent communicate its state to the node via FiLM. then do PMPNN style message passing, i.e. Vi += sum_j[MLP[cat[Vi, Vj, Eij]]]. Now that the nodes state has been updated, communicate that info to the latent via FiLM, then do the main latent denoising (my heart is telling me attention, but my mind says CNN is more practical with my compute, and U-net is more tried and tested). do multiple layers of this, probably three.
-                    
-                    - another idea is to do a unet architecture, which first does the downsampling of the latent and the bottleneck, and uses this representation to update the nodes. do the message passing like before, communicate state of node to bottlenecked latent, and then upsample like in classic unet, but the skip connections come from the downsampling phase which was not conditioned on backbone. i think i like this idea best.
+                    - planning to do a unet architecture, which first downsamples the latent all the way tp the bototleneck. before each upsampling operation, use the condensed representation to update the nodes via FiLM, do PMPNN style message passing, i.e. Vi += sum_j[MLP[cat[Vi, Vj, Eij]]], where the nodes carry backbone info AND info about the abstracted latent. after that communicate state of node to condensed latent via FiLM, upsample and cat with the non-conditioned symmetric voxel. this allows the downsampling operation to capture large semantic features about the latent without any conditioning first, then the nodes carry this info and send to other nodes. also allows the final representation to be a mix of conditioned and non-conditioned information.
 
     - Amino Acid Classification
 
