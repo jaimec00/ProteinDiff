@@ -91,3 +91,6 @@ for aa, atom_pcs in raw_charges.items():
 
 # X is treated as glycine
 amber_partial_charges[aa_2_lbl("X"), :] = amber_partial_charges[aa_2_lbl("G"), :]
+
+# will be using the electric field 
+coulomb_constant = 1 # need to figure out what it is in the correct units

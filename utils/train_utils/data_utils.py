@@ -40,7 +40,7 @@ class EpochBioUnits():
 
 		self.biounits = []
 		self.chains = [] # also store chain ids so can create the chain mask
-        self.biounit_hashes = {}
+		self.biounit_hashes = {}
 		self.batches = []
 	
 		self.generator = torch.Generator() # on cpu, doesnt really matter
@@ -173,7 +173,7 @@ class BioUnit():
 		R = xform[:, :3, :3] # num_copies x 3 x 3
 		T = xform[:, :3, 3] # num_copies x 3
 
-		coords = (torch.matmul(self.coords.unsqueeze(0), R.transpose(1,2).unsqueeze(1)) + T.view(num_copies, 1, 1, 3)).view(-1,self.coords.size(1),3) # 1 x N x A x 3 @ n x 1 x 3 x 3 + n x 1 x 1 x 3 --> n*N x A x 3
+		coords = torch.einsum("bij,raj->brai", R, coords) + T.view(num_copies, 1,1,3)
 
 		# adjust sizes based on the number of copies made
 		chain_idxs = {chain: [[idxs[0] + self.size*i, idxs[1] + self.size*i] for i in range(num_copies)] for chain, idxs in self.chain_idxs.items()}
@@ -471,11 +471,11 @@ class DataCleaner():
 		# define paths
 		self.data_path = data_path
 		self.pdb_path = self.data_path / Path("pdb")
-        self.val_clusters_path = Path("valid_clusters.txt")
+		self.val_clusters_path = Path("valid_clusters.txt")
 		self.test_clusters_path = Path("test_clusters.txt")
 		self.all_clusters_path = Path("list.csv")
 		
-        # define output path
+		# define output path
 		self.new_data_path = new_data_path
 			
 		# read which clusters are for validation and for testing
@@ -531,7 +531,7 @@ class DataCleaner():
 			# now deal with the results
 
 			# assign BIOUNIT and BIOUNIT_SIZE for the chains
-            chain_in_biounit = self.cluster_info.CHAINID.isin(pdb_biounits.keys())
+			chain_in_biounit = self.cluster_info.CHAINID.isin(pdb_biounits.keys())
 			self.cluster_info.loc[chain_in_biounit, "BIOUNIT"] = self.cluster_info.loc[chain_in_biounit, :].apply(lambda row: ';'.join(pdb_biounits[row.CHAINID]["BIOUNIT"]), axis=1)
 			self.cluster_info.loc[chain_in_biounit, "BIOUNIT_SIZE"] = self.cluster_info.loc[chain_in_biounit, :].apply(lambda row: ';'.join([str(i) for i in pdb_biounits[row.CHAINID]["BIOUNIT_SIZE"]]), axis=1)
 
@@ -542,10 +542,10 @@ class DataCleaner():
 			
 	def compute_biounits(self, pdbid):
 
-        # get df rows corresponding to this pdb
+		# get df rows corresponding to this pdb
 		pdbs_chunk = self.cluster_info.loc[self.cluster_info.PDB.eq(pdbid), :]
 
-        # initialize defaultdict of {chain: biounit}
+		# initialize defaultdict of {chain: biounit}
 		pdb_biounits = defaultdict(lambda: defaultdict(list))
 
 		# get the biounits for this pdb, including the composite chains, sequence similarities to other chains, and assembly xforms (keys are the chains making it up)
@@ -558,7 +558,7 @@ class DataCleaner():
 		for _, chain in single_chains.items():
 			asmb_xforms[chain].append([torch.eye(4).unsqueeze(0)]) # append a one element list of identity xforms
 
-        # define the path to save the cleaned pdb
+		# define the path to save the cleaned pdb
 		pdb_path = self.new_data_path / Path(f"pdb/{pdbid[1:3]}")
 
 		# loop through each biounit
@@ -593,7 +593,7 @@ class DataCleaner():
 
 	def get_pdb_biounits(self, pdbid):
 		
-        # load the pdb
+		# load the pdb
 		pdb = self.load_pdb(pdbid)
 
 		# first get the seq sims of the chains
@@ -704,4 +704,4 @@ if __name__ == "__main__":
 
 	args = parser.parse_args()
 
-    data_cleaner = DataCleaner(data_path=args.data_path, new_data_path=args.new_data_path, test=args.test)
+	data_cleaner = DataCleaner(data_path=args.data_path, new_data_path=args.new_data_path, test=args.test)

@@ -12,3 +12,4 @@ build/
 results*
 models/
 test/
+test_data/

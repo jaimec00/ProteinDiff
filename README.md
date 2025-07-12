@@ -1,10 +1,6 @@
 # ProteinDiff - Graph-Conditioned Latent Diffusion (work in progress)
-
-## summary
-
-this is my last attempt at beating protein mpnn, for now...
-
-this is the idea:
+## Structure Conditioned Protein Sequence Generation
+### summary
 
 the input is the N, $C_\alpha$, and C atoms for inference, but for training need all atoms of the protein. 
 
@@ -12,7 +8,7 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 2. next step is to define a local coordinate frame for each residue, the y-axis is the vector pointing from $C_\alpha$ to the $C_\beta$, the x-axis is the vector that is pointing from N to C projected onto the plane normal to the y-axis vector, and the z-axis is the cross product of the two.  use virtual $C_\beta$ for frame computation, but true position for electrostatic potential later (no $C_\beta$ for glycine).
 3. using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z \AA^3$ (e.g. 9 x 5 x 9 $\AA^3$, in this case each cell is 1 $\AA^3$, giving $9\times5\times9 = 405$ cells)
 4. now we compute the topK nearest neighbors of each residue using $C_\alpha$ coordinates. 
-5. for each atom we assign a partial charge using the AMBER-defined partial charges. using the the Debye-Huckel screened potential, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where the scalar value of each cell is the electric potential at that point.
+5. for each atom we assign a partial charge using the AMBER-defined partial charges. using a modified electric field formula, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point.
 6. here is where it gets interesting.
 
     - Variational Auto Encoder (VAE)
@@ -25,7 +21,7 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 
         - Decoder
 
-            - Decoder performs transposed convolutions to upsample the latent. loss is basic MSE, summed over residues.
+            - Decoder performs transposed convolutions to upsample the latent (symmetric to encoder). loss is basic MSE, summed over residues.
 
     - Graph-Conditioned Latent Diffusion
 
@@ -37,14 +33,21 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 
         - Graph-Conditioned Latent Diffusion
 
-            - Will also do my best to keep this as simple as possible. However, not sure if I should use a U-Net, CNN, or maybe (patchified) attention over latent voxel cells, for the main denoising of the latent voxel. the timestep conditioning will probably be implemented using adaLN throughout the module. the graph conditioning is a little trickier, shown below. runs for all the timesteps, probably will use the original $\beta$-scheduler for simplicity. 
+            - I am thinking of copying DiT. I will also have a few preprocessing convolutions, but they will probably not downsample, since the latent is pretty small (probably 4x4x4x4) i think the conv operations will be to upsample the feature channel only to transformer hidden dim, with no conditioning. then do downsampling conv w/ SiLU activation, keeping the feature dim as is, until get 1x1x1xd_model. project to 2*d_model, chunk into gamma and beta, do V = gamma*V + beta, then do PMPNN style message passing, i.e. Vi += sum_j[MLP[Vi, Vj, Eij]], where the nodes carry backbone info AND info about the abstracted latent. once nodes have been updated, use adaLN with conditioning coming from MLP[t, V] on the 4x4x4xdmodel tensor, perform self attention. repeat for every DiT layer.  
             
-                - Communication between Latent, Nodes, and Edges
-                    
-                    - planning to do a unet architecture, which first downsamples the latent all the way tp the bototleneck. before each upsampling operation, use the condensed representation to update the nodes via FiLM, do PMPNN style message passing, i.e. Vi += sum_j[MLP[cat[Vi, Vj, Eij]]], where the nodes carry backbone info AND info about the abstracted latent. after that communicate state of node to condensed latent via FiLM, upsample and cat with the non-conditioned symmetric voxel. this allows the downsampling operation to capture large semantic features about the latent without any conditioning first, then the nodes carry this info and send to other nodes. also allows the final representation to be a mix of conditioned and non-conditioned information.
-
     - Amino Acid Classification
 
-        - This is the simplest module. simply predicts the amino acid class from the reconstructed voxel potentials. Trained alongside vae, but the output of the decoder is detached before going into the classifier, this way the gradients of the classifier do not affect the VAE gradients. Loss is CEL for this module, summed over residues. 
-    
+        - This is the simplest module. simply predicts the amino acid class from the reconstructed voxel potentials. Trained alongside vae, but the output of the decoder is detached before going into the classifier, this way the gradients of the classifier do not affect the VAE gradients. Loss is CEL for this module, summed over residues. Will probably do something similar to DiT abstraction of the latent, ie conv downsample until get 1x1x1xdmodel tensor, project to num_aa, softmax and sample. 
+
+Here is an example of what exactly the model is denoising. Note that these plots are produced using the data space, not the latent space, and no denoising has been done, it is just to give you an idea:
+
+<p align="center">
+  <img src="docs/img/gauss_noise.png" alt="Arch" width="800"/>
+</p>
+
+<p align="center">
+  <img src="docs/img/true_4l3o_A_resi5_R.png" alt="Arch" width="800"/>
+</p>
+
+
 
