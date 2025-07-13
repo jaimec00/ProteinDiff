@@ -13,14 +13,21 @@ class Epoch():
 		self.training_run_parent = training_run
 		self.epoch = epoch
 		self.epochs = training_run.training_parameters.epochs
-		
+	
+	def training(self):
+		if self.training_run_parent.train_type=="vae":
+			self.training_run_parent.model.module.vae.train()
+			self.training_run_parent.model.module.classifier.train()
+		elif self.training_run_parent.train_type=="diffusion":
+			self.training_run_parent.model.module.diffusion.train()
+
 	def epoch_loop(self):
 		'''
 		a single training loop through one epoch. loops through batches, logs the losses, and runs validation
 		'''
 
 		# make sure in training mode
-		self.training_run_parent.model.module.train()
+		self.training()
 
 		# setup the epoch
 		if self.training_run_parent.rank==0:
@@ -64,42 +71,38 @@ class Epoch():
 class Batch():
 	def __init__(self, data_batch, b_idx=None, epoch=None, inference=False, temp=1e-6):
 
+		# data
 		self.coords = data_batch.coords 
 		self.labels = data_batch.labels
-		self.aas = data_batch.labels if not inference else -torch.ones_like(data_batch.labels)# self.labels is edited for loss computation, keep this one for model input
-		self.chain_idxs = data_batch.chain_idxs
-		self.chain_mask = data_batch.chain_masks | data_batch.homo_masks
-		self.key_padding_mask = data_batch.key_padding_masks
 
-		# this is how pmpnn does the decoding order so that visible chains more likely to be predicted first. bit obtuse but whatever
-		rand_vals = (self.chain_mask+0.0001) * torch.abs(torch.randn_like(self.chain_mask, dtype=torch.float32))
-		rand_vals = torch.where(self.key_padding_mask, float("inf"), rand_vals) # masked positions decoded last to make inference quicker
-		self.decoding_order = torch.argsort(rand_vals, dim=1) # Z x N
+		# define masks
+		self.atom_mask = data_batch.atom_mask
+		self.valid_mask = ~data_batch.pad_mask & data_batch.coords_mask & data_batch.seq_mask
+		self.loss_mask = self.valid_mask & data_batch.chain_mask & data_batch.canonical_seq_mask
 
+		# other stuff
 		self.b_idx = b_idx
 		self.epoch_parent = epoch
-
 		self.inference = inference
 		self.temp = temp
-
+		self.train_type = epoch.training_run_parent.training_parameters.train_type
 		self.world_size = epoch.training_run_parent.world_size
 		self.rank = epoch.training_run_parent.rank
 
 	def move_to(self, device):
 
-		self.labels = self.labels.to(device)
-		self.aas = self.aas.to(device)
 		self.coords = self.coords.to(device)
-		self.chain_mask = self.chain_mask.to(device)
-		self.key_padding_mask = self.key_padding_mask.to(device)
-		self.decoding_order = self.decoding_order.to(device)
+		self.labels = self.labels.to(device)
+		self.atom_mask = self.atom_mask.to(device)
+		self.valid_mask = self.valid_mask.to(device)
+		self.loss_mask = self.loss_mask.to(device)
 
 	def batch_learn(self):
 		'''
 		a single iteration over a batch.
 		'''
 
-		# add random noise to the coordinates
+		# add random noise to the coordinates (batch learn only used in training)
 		self.noise_coords()
 
 		# forward pass
@@ -116,14 +119,8 @@ class Batch():
 		# move batch to gpu
 		self.move_to(self.epoch_parent.training_run_parent.gpu)
 
-		# update labels for accurate loss computation (used by output objects)
-		self.labels = self.labels.masked_fill((~self.chain_mask) | self.key_padding_mask | (self.labels == aa_2_lbl("X")), -1)
-
-		# get model outputs
-		self.outputs = self.get_outputs()
-
-		# get losses (adds them to training run tmp losses)
-		self.outputs.get_losses()
+		# get model outputs and losses
+		self.get_outputs()
 
 	def batch_backward(self):
 
@@ -131,31 +128,16 @@ class Batch():
 		accumulation_steps = self.epoch_parent.training_run_parent.training_parameters.loss.accumulation_steps
 		optim = self.epoch_parent.training_run_parent.optim
 		scheduler = self.epoch_parent.training_run_parent.scheduler
-
-		if self.epoch_parent.training_run_parent.training_parameters.loss.token_based_step:
-			toks_proc = torch.tensor(self.epoch_parent.training_run_parent.toks_processed, device=self.epoch_parent.training_run_parent.gpu)
-			torch.distributed.all_reduce(toks_proc, op=torch.distributed.ReduceOp.SUM)
-			learn_step = (toks_proc.item() + 1) > accumulation_steps
-		else:
-			learn_step = (self.b_idx + 1) % accumulation_steps == 0
+		learn_step = (self.b_idx + 1) % accumulation_steps == 0
 
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
-
-		if self.epoch_parent.training_run_parent.debug.print_losses:
-			if self.rank==0: # only printing for rank 0 for now
-				self.epoch_parent.training_run_parent.output.log.info(f"loss: {loss}")
 
 		# perform backward pass to accum grads
 		loss.backward()
 
 		if learn_step:
 		
-			if self.epoch_parent.training_run_parent.debug.print_grad_L2:
-				if self.rank==0:
-					L2 = sum(param.grad**2 for param in self.epoch_parent.training_run_parent.model.module.parameters() if param.grad is not None)
-					self.epoch_parent.training_run_parent.output.log.info(f"grad L2: {L2}")
-
 			# grad clip
 			if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
 				torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
@@ -166,7 +148,6 @@ class Batch():
 			scheduler.step()
 
 			self.epoch_parent.training_run_parent.step += 1
-			self.epoch_parent.training_run_parent.toks_processed = 0 # reset to 0 once target number of toks processed
 
 	def noise_coords(self):
 
@@ -183,34 +164,33 @@ class Batch():
 		used to get output predictions
 		'''
 
-		# run the model
-		seq_logits = self.epoch_parent.training_run_parent.model.module(	self.coords, self.aas, self.chain_idxs, 
-																			node_mask=self.key_padding_mask, 
-																			decoding_order=self.decoding_order, 
-																			inference=self.inference, temp=self.temp
-																		)
+		model = epoch.training_run_parent.model.module			
+		loss_function = self.epoch_parent.training_run_parent.losses.loss_function
 
-		# convert to output object
-		return ModelOutputs(self, seq_logits)
+		if self.train_type=="vae":
 
-	def size(self, idx):
-		return self.labels.size(idx)
+			_, fields, _, _ = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
+			latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
+			seq_pred = model.classifier(fields_pred.detach()) # detach so classifier loss doesnt affect vae
+			losses = loss_function.vae(latent_mu, latent_logvar, fields_pred, fields, seq_pred, self.labels, self.loss_mask)
 
-# ----------------------------------------------------------------------------------------------------------------------
-class ModelOutputs():
-	'''
-	'''
-	def __init__(self, batch_parent, seq_pred):
-		
-		# batch parent
-		self.batch_parent = batch_parent 
 
-		# predictions
-		self.seq_pred = seq_pred # seq pred from wf output
+		elif self.train_type=="diffusion":
 
-		# valid tokens for averaging
-		self.valid_toks = (batch_parent.labels!=-1).sum().item()
+			if self.inference:
+				coords_bb = model.prep.get_backbone(self.coords)
+				nbrs, nbr_mask = model.prep.get_neighbors(coords_bb, self.valid_mask)
+				generated_latent = model.diffusion.generate(coords_bb, nbrs, nbr_mask)
+				fields_pred = model.vae.dec(generated_latent)
+				seq_pred = model.classifier(fields_pred)
+				losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
+			
+			else:
+				coords_bb, fields, nbrs, nbr_mask = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
+				latent, latent_mu, latent_logvar = model.vae.enc(fields)
+				t = model.diffusion.get_rand_t_for(latent)
+				latent_noised, noise = model.diffusion.noise(latent, t)
+				noise_pred = model.diffusion(latent_noised, t, nbrs, nbr_mask)
+				losses = loss_function.diff(noise_pred, noise, self.loss_mask)
 
-	def get_losses(self):
-		losses = self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.seq_pred, self.batch_parent.labels, inference=self.batch_parent.inference)
-		self.batch_parent.epoch_parent.training_run_parent.losses.tmp.add_losses(*losses, valid_toks=self.valid_toks)
+		self.epoch_parent.training_run_parent.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())

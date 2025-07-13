@@ -160,8 +160,8 @@ class BioUnit():
 	def __init__(self, biounit_dict, max_seq_size=float("inf")):
 
 		self.coords = biounit_dict["coords"]
-		self.atom_mask = biounit_dict["mask"]
 		self.labels = biounit_dict["labels"] 
+		self.atom_mask = biounit_dict["atom_mask"]
 		self.chain_idxs = biounit_dict["chain_idxs"] # dict of chain [start, end)
 		self.seq_sims = biounit_dict["seq_sims"] # dict of dicts, indicating seq sim of each chain to all others, outer dicts contains each chain as values, inner dict is value of outer, with keys of inner dict being all other chains, and values being the seq sims
 		self.asmb_xforms = [xform for xform in biounit_dict["asmb_xforms"] if xform.size(0)*self.labels.size(0) <= max_seq_size] # transforms to get biological assembly. list of tensors. first dim of each tensor is the number of copies
@@ -189,49 +189,46 @@ class DataBatch():
 	'''
 	class for a batch to process, used in training_run
 	'''
-	def __init__(self, epoch_biounits, batch, use_chain_mask, homo_thresh, device="cpu"):
+	def __init__(self, epoch_biounits, batch, homo_thresh, device="cpu"):
 		
 		# initialize a list of sample for each
 		labels = [epoch_biounits[idx].labels for idx, _ in batch]
 		coords = [epoch_biounits[idx].coords for idx, _ in batch]
 		atom_masks = [epoch_biounits[idx].atom_mask for idx, _ in batch]
-		self.chain_idxs = [[chain_copy for chain in epoch_biounits[idx].chain_idxs.values() for chain_copy in chain] for idx, _ in batch]# append the [start,stop] idxs of each chain in the sample, chain ids not necessary
-		homo_masks = [self.get_homo_mask(epoch_biounits, idx, homo_thresh, device) for idx, _ in batch]
-		chain_masks = [self.get_chain_mask(epoch_biounits, idx, use_chain_mask, device) for idx, _ in batch]
+		chain_masks = [self.get_chain_mask(epoch_biounits, idx, homo_thresh, device) for idx, _ in batch]
 
 		# pad in seq sim
 		seq_size = max(label.size(0) for label in labels)
 		self.labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
 		self.coords = self.pad_and_batch(coords, pad_val="zero", max_size=seq_size)
+		self.chain_idxs = [[chain_copy for chain in epoch_biounits[idx].chain_idxs.values() for chain_copy in chain] for idx, _ in batch] # no padding for chain idxs
 
-		self.atom_masks = self.pad_and_batch(atom_masks, pad_val="zero", max_size=seq_size)
-		self.chain_masks = self.pad_and_batch(chain_masks, pad_val="zero", max_size=seq_size).to(torch.bool)
-		self.homo_masks = self.pad_and_batch(homo_masks, pad_val="zero", max_size=seq_size).to(torch.bool)
-		self.kp_masks = self.labels!=-1
-		self.coords_mask = ~(self.atom_mask[:, :, :3].any(dim=2)) # if n, ca, or c are missing, consider the coordinates missing
+		# compute/pad masks
+		self.pad_mask = torch.tensor([size for _, size in batch], device=device).view(-1,1) > torch.arange(seq_size).view(1,-1)
+		self.atom_mask = self.pad_and_batch(atom_masks, pad_val="zero", max_size=seq_size)
+		self.chain_mask = self.pad_and_batch(chain_masks, pad_val="zero", max_size=seq_size).to(torch.bool)
+		self.seq_mask = self.labels!=-1
+		self.canonical_seq_mask = self.labels!=aa_2_lbl("X")
+		self.coords_mask = self.atom_mask[:, :, :3].all(dim=2) # if n, ca, or c are missing, consider the coordinates missing
 
-	def get_homo_mask(self, epoch_biounits, idx, homo_thresh, device):
+	def get_chain_mask(self, epoch_biounits, idx, homo_thresh, device):
 
-		homo_mask = torch.zeros(epoch_biounits[idx].labels.shape, dtype=torch.bool, device=device)
+		# init the chain_mask
+		chain_mask = torch.zeros(epoch_biounits[idx].labels.shape, dtype=torch.bool, device=device)
+
+		# loop through chains
+		for start, end in epoch_biounits[idx].chain_idxs[epoch_biounits.chains[idx]]:
+			chain_mask[start:end] = True
+
+		# get seq sims between chains to determine homo
 		seq_sims = epoch_biounits[idx].seq_sims[epoch_biounits.chains[idx]]
 		homo_chains = [chain for chain, seq_sim in seq_sims.items() if seq_sim > homo_thresh] # list of chain identifiers whose tm score is greater than the threshold compared to the representative chain
-		if homo_chains: # skip if the list is empty
-			# list of [start, stop] idxs 
-			homo_idxs = [epoch_biounits[idx].chain_idxs[chain] for chain in homo_chains]
-			for chain_copies in homo_idxs:
-				for start, stop in chain_copies:
-					homo_mask[start:stop] = True
-
-		return homo_mask
-
-	def get_chain_mask(self, epoch_biounits, idx, use_chain_mask, device):
-
-		if use_chain_mask:
-			chain_mask = torch.zeros(epoch_biounits[idx].labels.shape, dtype=torch.bool, device=device)
-			for start_idx, end_idx in epoch_biounits[idx].chain_idxs[epoch_biounits.chains[idx]]:
-				chain_mask[start_idx:end_idx] = True
-		else:
-			chain_mask = torch.ones(epoch_biounits[idx].labels.shape, dtype=torch.bool, device=device)
+		homo_idxs = [epoch_biounits[idx].chain_idxs[chain] for chain in homo_chains]
+		
+		# loop through homo chains
+		for chain_copies in homo_idxs:
+			for start, stop in chain_copies:
+				chain_mask[start:stop] = True
 
 		return chain_mask
 
@@ -278,7 +275,6 @@ class DataHolder():
 	def __init__(self, 	data_path, num_train, num_val, num_test, 
 						batch_tokens=16384, max_batch_size=128, 
 						min_seq_size=16, max_seq_size=16384,
-						use_chain_mask=True,
 						max_resolution=3.5,
 						homo_thresh=0.70,
 						rank=0, world_size=1, rng=0
@@ -295,8 +291,7 @@ class DataHolder():
 		self.max_seq_size = max_seq_size # max tokens per sample
 		self.min_seq_size = min_seq_size
 
-		# whether to mask non-cluter-representative chains in the biounit
-		self.use_chain_mask = use_chain_mask
+		# seq sim threshold for homo chain detection
 		self.homo_thresh = homo_thresh
 
 		# for distributed training
@@ -352,14 +347,14 @@ class DataHolder():
 		loads the Data Objects, allowing for the objects to be retrieved afterwards
 		'''
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.homo_thresh, self.rank, self.world_size, self.rng)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size,  self.homo_thresh, self.rank, self.world_size, self.rng)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.homo_thresh, self.rank, self.world_size, self.rng)
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.homo_thresh, self.rank, self.world_size, self.rng)
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.homo_thresh, self.rank, self.world_size, self.rng)
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.homo_thresh, self.rank, self.world_size, self.rng)
 
 class Data():
-	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, homo_thresh=0.70, rank=0, world_size=1, rng=0, device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, homo_thresh=0.70, rank=0, world_size=1, rng=0, device="cpu"):
 
 		# path to pdbs
 		self.pdb_path = data_path / Path("pdb")
@@ -369,7 +364,6 @@ class Data():
 		self.max_batch_size = max_batch_size
 		self.max_seq_size = max_seq_size
 		self.min_seq_size = min_seq_size
-		self.use_chain_mask = use_chain_mask
 		self.homo_thresh = homo_thresh # if tm_score is above this, then corresponding chain sequences are masked
 
 		self.rank = rank
@@ -398,7 +392,7 @@ class Data():
 		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1, random_state=self.rng)
 
 		# init progress bar
-		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading progress", unit="step")
+		load_pbar = tqdm(total=len(sampled_pdbs), desc="Data Loading Progress", unit="Step")
 
 		# set random module seed
 		random.seed(a=self.rng)
@@ -449,7 +443,7 @@ class Data():
 
 		for batch in self.epoch_biounits.batches[self.rank]: # get the batch indices for this gpu
 
-			data_batch = DataBatch(self.epoch_biounits, batch, self.use_chain_mask, self.homo_thresh)
+			data_batch = DataBatch(self.epoch_biounits, batch, self.homo_thresh)
 
 			yield data_batch
 

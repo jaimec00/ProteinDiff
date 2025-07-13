@@ -88,15 +88,21 @@ class TrainingRun():
 		self.training_parameters = args.training_parameters
 		self.step = 0 # log the step number
 		
-		self.data = DataHolder(	(args.data.single_chain_data_path if args.training_parameters.single_chain else args.data.multi_chain_data_path), # single chain or multichain
+		self.data = DataHolder(	args.data.data_path, # single chain or multichain
 								args.data.num_train, args.data.num_val, args.data.num_test, 
 								args.data.batch_tokens, args.data.max_batch_size, 
 								args.data.min_seq_size, args.data.max_seq_size, 
-								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution,
-								args.training_parameters.ca_only_model, args.training_parameters.regularization.homo_thresh, self.rank, self.world_size, self.training_parameters.rng
+								args.data.max_resolution,
+								args.training_parameters.regularization.homo_thresh, 
+								self.rank, self.world_size, self.training_parameters.rng
 							)
 		
-		self.losses = TrainingRunLosses(args.training_parameters.regularization.label_smoothing)
+		self.losses = TrainingRunLosses(	args.training_parameters.train_type,
+											args.training_parameters.losses.classifier.label_smoothing, 
+											args.training_parameters.losses.vae.beta,
+											args.training_parameters.losses.cos.beta,
+											args.training_parameters.losses.diff.mse,
+									)
 
 		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints, rank=self.rank, world_size=self.world_size)
 
@@ -131,8 +137,14 @@ class TrainingRun():
 		self.model.to(self.gpu)
 		self.model = DDP(self.model, device_ids=[self.rank])
 
+		# load any checkpoints
 		if self.checkpoint:
-			self.model.module.load_state_dict(self.checkpoint["model"])
+			state_dicts = self.checkpoint["model"]
+			self.model.module.vae.load_state_dict(state_dicts["vae"])
+			self.model.module.classifier.load_state_dict(state_dicts["classifier"])
+			if self.training_parameters.train_type=="diffusion":
+				self.model.module.diffusion.load_state_dict(state_dicts["diffusion"])
+
 
 		# get number of parameters for logging
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.module.parameters())
@@ -325,7 +337,7 @@ class TrainingRun():
 		self.data.load("test")
 
 		# init losses
-		self.losses.clear_tmp_losses()
+		self.losses.set_inference_losses(self.training_parameters.train_type)
 
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
@@ -341,8 +353,8 @@ class TrainingRun():
 			for data_batch in self.data.test_data:
 					
 				# init batch
-				batch = Batch(  data_batch, 
-								temp=self.training_parameters.inference.temperature, 
+				batch = Batch(  data_batch,
+								temp=self.training_parameters.inference.temperature,
 								inference=True, epoch=dummy_epoch
 							)
 

@@ -6,14 +6,14 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 
 1. first step is to create the virtual $C_\beta$ atom from empirical constants. 
 2. next step is to define a local coordinate frame for each residue, the y-axis is the vector pointing from $C_\alpha$ to the $C_\beta$, the x-axis is the vector that is pointing from N to C projected onto the plane normal to the y-axis vector, and the z-axis is the cross product of the two.  use virtual $C_\beta$ for frame computation, but true position for electrostatic potential later (no $C_\beta$ for glycine).
-3. using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z \AA^3$ (e.g. 9 x 5 x 9 $\AA^3$, in this case each cell is 1 $\AA^3$, giving $9\times5\times9 = 405$ cells)
+3. using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z (e.g. 16 x 16 x 16, , giving $16\times16\times16\times = 512$ cells, in this case each cell is 0.5**3 $\AA^3$, making the whole voxel 256 $\AA^3$)
 4. now we compute the topK nearest neighbors of each residue using $C_\alpha$ coordinates. 
-5. for each atom we assign a partial charge using the AMBER-defined partial charges. using a modified electric field formula, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point.
+5. for each atom we assign a partial charge using the AMBER-defined partial charges. using modified electric vector field formula, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point. However, in order to avoid the model overfitting to "empty" regions where the amino acid is not present and magnitude is near zero, we normalize the vectors to unit length. This creates a vector field, indicating the direction of the electric field lines.
 6. here is where it gets interesting.
 
     - Variational Auto Encoder (VAE)
         
-        - the first step is to train a variational autoencoder that learns how to compress the voxelized electric field of each residue, capturing broad and semantic information, such that the it can be reconstructed by the decoder using the sampled latent representation. the vae is pre-trained (along with classifier, but with stop-grad) on the true electric fields computed from the nearest neighbors' atoms. In this stage, there is no backbone/graph conditioning, the vae only has access to each residues individual voxels, with no cross-talk between residues, besides the initial potential calculation.
+        - the first step is to train a variational autoencoder that learns how to compress the voxelized electric field of each residue, capturing broad and semantic information, such that the it can be reconstructed by the decoder using the sampled latent representation. the vae is pre-trained (along with classifier, but with stop-grad) on the true electric field unit vectors computed from the nearest neighbors' atoms. In this stage, there is no backbone/graph conditioning, the vae only has access to each residues individual voxels, with no cross-talk between residues, besides the initial potential calculation.
         
         - Encoder
 
@@ -21,7 +21,7 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 
         - Decoder
 
-            - Decoder performs transposed convolutions to upsample the latent (symmetric to encoder). loss is basic MSE, summed over residues.
+            - Decoder performs transposed convolutions to upsample the latent (symmetric to encoder). the output of the decoder is a 3 component vector for each cell, for each residue, each of which is manually normalized to unit length. the loss is then a cosine similarity loss, summed over residues.
 
     - Graph-Conditioned Latent Diffusion
 
@@ -39,14 +39,14 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 
         - This is the simplest module. simply predicts the amino acid class from the reconstructed voxel potentials. Trained alongside vae, but the output of the decoder is detached before going into the classifier, this way the gradients of the classifier do not affect the VAE gradients. Loss is CEL for this module, summed over residues. Will probably do something similar to DiT abstraction of the latent, ie conv downsample until get 1x1x1xdmodel tensor, project to num_aa, softmax and sample. 
 
-Here is an example of what exactly the model is denoising. Note that these plots are produced using the data space, not the latent space, and no denoising has been done, it is just to give you an idea:
+Here is an example of what the model is denoising. Note that these plots are produced using the data space, not the latent space, and no denoising has been done, it is just to give an intuitive idea:
 
 <p align="center">
-  <img src="docs/img/gauss_noise.png" alt="Arch" width="800"/>
+  <img src="docs/img/gauss_noise_unit.png" alt="Arch" width="800"/>
 </p>
 
 <p align="center">
-  <img src="docs/img/true_4l3o_A_resi5_R.png" alt="Arch" width="800"/>
+  <img src="docs/img/true_4l3o_A_resi2_R_unit.png" alt="Arch" width="800"/>
 </p>
 
 

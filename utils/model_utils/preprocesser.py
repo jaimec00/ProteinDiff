@@ -4,20 +4,20 @@ from data.constants import amber_partial_charges, aa_2_lbl, coulomb_constant
 
 class PreProcesser(nn.Module):
 	
-	def __init__(self, top_k=30, voxel_dims=(6,8,6), cell_size=1.0):
+	def __init__(self, top_k=16, voxel_dims=(16,16,16), cell_dim=1.0):
 		super().__init__()
 
 		x_cells, y_cells, z_cells = voxel_dims
 		voxel_x = torch.arange(x_cells).view(-1,1,1).expand(voxel_dims) - x_cells/2
 		voxel_y = torch.arange(y_cells).view(1,-1,1).expand(voxel_dims) - y_cells/4 # more cells in positive y direction, since that is where the side chain is located
 		voxel_z = torch.arange(z_cells).view(1,1,-1).expand(voxel_dims) - z_cells/2
-		voxel = (cell_size**(1/3)) * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
+		voxel = cell_dim * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
 		self.register_buffer("voxel", voxel)
-		self.res = cell_size
+		self.res = cell_dim #(3*(cell_dim**2))**0.5
 
 		self.top_k = top_k
 
-	def forward(self, C, L, atom_mask, kp_mask):
+	def forward(self, C, L, atom_mask, valid_mask):
 		'''
 		C (torch.Tensor): full atomic coordinates of shape (Z,N,A,3)
 		L (torch.Tensor): amino acid class labels of shape (Z,N)
@@ -39,7 +39,7 @@ class PreProcesser(nn.Module):
 			local_voxels = self.compute_voxels(local_origins, local_frames) # Z,N,Vx,Vy,Vz,3
 
 			# compute the nearest neighbors
-			nbrs, nbr_mask = self.get_neighbors(C_backbone[:, :, 1, :], kp_mask) # use Ca coords
+			nbrs, nbr_mask = self.get_neighbors(C_backbone, valid_mask) # use Ca coords
 
 			# compute electric fields 
 			fields = self.compute_fields(C, L, local_voxels, nbrs, nbr_mask, atom_mask)
@@ -95,8 +95,8 @@ class PreProcesser(nn.Module):
 
 		return local_voxels
 
-	def get_neighbors(self, Ca, mask):
-
+	def get_neighbors(self, C, mask):
+		Ca = C[:, :, 1, :]
 		Z, N, S = Ca.shape
 		top_k = self.top_k
 		# if N<=self.top_k:
@@ -144,11 +144,11 @@ class PreProcesser(nn.Module):
 		dist_vectors =  voxels.view(Z, N, 1, Vx, Vy, Vz, 1, S) - C_nbrs.view(Z, N, K, 1, 1, 1, A, S) # Z,N,K,Vx,Vy,Vz,A,S 
 
 		# compute magnitudes, clamp to 2 times the cell resolution (default is 1 A^3), so atoms inside a cell arent overweighted, makes the field look more continuous
-		dists = torch.linalg.vector_norm(dist_vectors, dim=7, keepdim=True).clamp(min=self.res*2) # Z,N,K,Vx,Vy,Vz,A,1
+		dists = torch.linalg.vector_norm(dist_vectors, dim=7, keepdim=True) # Z,N,K,Vx,Vy,Vz,A,1
 
 		# the distance term is the r^{hat} / |r|^2 = r / |r|^3
 		# however, using r^{hat} / |r| = r / |r|^2, since this led to more continuous field, using |r|^3 clustered the field around atoms within the voxel
-		dist_term = dist_vectors / (dists**2) # Z,N,K,Vx,Vy,Vz,A,S
+		dist_term = dist_vectors / (dists.masked_fill(dists==0,1)*(dists.clamp(min=self.res*1)**2)) # Z,N,K,Vx,Vy,Vz,A,S
 
 		# get partial charges, zero out masked atoms
 		partial_charges = torch.gather(amber_partial_charges.view(1,1,AA,A).expand(Z,N,AA,A), 2, L.view(Z,N,1,1).expand(Z,N,1,A)) * atom_mask.unsqueeze(2) # Z, N, 1, A
@@ -161,12 +161,13 @@ class PreProcesser(nn.Module):
 		# using the actual coulomb constant made it less continuous, i want something that is image like, see visualization/compute_voxels.ipynb to see what im talking about
 		fields = torch.sum(partial_charges_nbrs.view(Z, N, K, 1, 1, 1, A, 1) * dist_term.view(Z, N, K, Vx, Vy, Vz, A, S), dim=(2,6)) # Z,N,Vx,Vy,Vz,S
 
-		# norm the each voxel independantly
-		norm_dims = (2,3,4,5)
-		fields_mean = fields.mean(dim=norm_dims, keepdim=True)
-		fields = fields - fields_mean
-		fields_std = fields.std(dim=norm_dims, keepdim=True)
-		fields = fields / fields_std.masked_fill(fields_std==0, 1)
+		# decidied to norm to unit vectors, thus the models job is to nudge them towards the true direction
+		# also works well with latent diffusion, as the compression makes sense, since there is redundancy due to continuous nature
+		fields_norm = torch.linalg.vector_norm(fields, dim=-1, keepdim=True)
+		fields = fields / fields_norm.masked_fill(fields_norm==0, 1)
+
+		# now reshape to Z,N,S,Vx,Vy,Vz to be compatible with conv operatinos later
+		fields = fields.permute(0,1,5,2,3,4)
 
 		return fields
 

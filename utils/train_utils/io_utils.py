@@ -20,16 +20,15 @@ class Output():
 
 	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):\
 
-		self.rank = rank # deal with the loggin logic here
-		self.world_size = world_size
-
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
 
-		self.cel_plot = self.out_path / Path("cel_plot.png")
-		self.acc_plot = self.out_path / Path("acc_plot.png")
+		self.plot_path = self.out_path / Path("plots")
+
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
+		self.rank = rank 
+		self.world_size = world_size
 
 	def setup_logging(self, log_file):
 
@@ -55,8 +54,6 @@ class Output():
 		'''basically just prints the config file w/ a little more info'''
 
 		log = 	textwrap.dedent(f'''
-
-		training the {"Ca only model" if training_parameters.ca_only_model else "full backbone model"}
 
 		total parameters: {training_parameters.num_params:,}
 		
@@ -91,11 +88,10 @@ class Output():
 			regularization:
 				dropout: {training_parameters.regularization.dropout}
 				noise_coords_std: {training_parameters.regularization.noise_coords_std}
-				use_chain_mask: {training_parameters.regularization.use_chain_mask}
 				homo_thresh: {training_parameters.regularization.homo_thresh}
 				label_smoothing: {training_parameters.regularization.label_smoothing}
 			loss:
-				accumulation_steps: {training_parameters.loss.accumulation_steps} {"tokens" if training_parameters.loss.token_based_step else "batches"} 
+				accumulation_steps: {training_parameters.loss.accumulation_steps} batches
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
 			lr:
 				lr_type: {training_parameters.lr.lr_type}
@@ -143,23 +139,16 @@ class Output():
 		for worker_loss in loss_list[1:]: # exclude the master loss object, as that is what we are extending
 			losses.tmp.extend_losses(worker_loss) 
 
-		tmp_losses = []
-
-		cel, seq_sim1, seq_sim3, seq_sim5, probs = losses.tmp.get_avg()
-		self.log.info(f"{mode} top 1 accuracy per token: {str(seq_sim1)}")	
-		self.log.info(f"{mode} top 3 accuracy per token: {str(seq_sim3)}")	
-		self.log.info(f"{mode} top 5 accuracy per token: {str(seq_sim5)}")	
-		self.log.info(f"{mode} true aa predicted likelihood per token: {str(probs)}")	
-		self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
-		tmp_losses.extend([cel, seq_sim1, seq_sim3, seq_sim5, probs])
+		losses_dict = losses.tmp.get_avg()
+		for loss_type, loss in losses_dict.items():
+			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
 		
 		if mode == "train":
-			losses.train.add_losses(*tmp_losses)
+			losses.train.add_losses(losses_dict)
 		elif mode == "validation":	
-			losses.val.add_losses(*tmp_losses)
+			losses.val.add_losses(losses_dict)
 		else: # testing
 			losses.test.extend_losses(losses.tmp)
-
 
 	def log_epoch_losses(self, losses):
 		self.log_losses(losses, "train")
@@ -170,51 +159,38 @@ class Output():
 	def log_test_losses(self, losses):
 		self.log_losses(losses, "test")
 
-	def plot_training(self, losses, training_type):
+	def plot_training(self, losses):
 
 		# convert to numpy arrays
 		losses.to_numpy()
 
-		# convert to numpy arrays
-		losses.to_numpy()
+		# make the output directory
+		self.plot_path.mkdir(exist_ok=True)
 
-		epochs = [i + 1 for i in range(len(losses.train))]
+		# specify number of epochs
+		epochs = np.arange(len(losses.train))
 
-		# plot cel
-		plt.plot(epochs, losses.train.cel, marker='o', color='red', label="Training")
-		plt.plot(epochs, losses.val.cel, marker='o', color='blue', label="Validation")
-
-		plt.title('Cross Entropy Loss vs. Epochs')
-		plt.xlabel('Epochs')
-		plt.ylabel('Cross Entropy Loss')
-		plt.legend()
-		plt.grid(True)
-		plt.savefig(self.cel_plot)
-		self.log.info(f"plot of cross_entropy loss vs. epochs saved to {self.cel_plot}")
-
-		plt.figure()
-
-		# plot accuracy
-		plt.plot(epochs, losses.train.matches1, marker='o', color='red', label="Training (Top 1)")
-		plt.plot(epochs, losses.train.matches3, marker='x', color='red', label="Training (Top 3)")
-		plt.plot(epochs, losses.train.matches5, marker='^', color='red', label="Training (Top 5)")
-		plt.plot(epochs, losses.train.probs, marker='v', color='red', label="Training (Predicted Likelihood of True AA)")
-		plt.plot(epochs, losses.val.matches1, marker='o', color='blue', label="Validation (Top 1)")
-		plt.plot(epochs, losses.val.matches3, marker='x', color='blue', label="Validation (Top 3)")
-		plt.plot(epochs, losses.val.matches5, marker='^', color='blue', label="Validation (Top 5)")
-		plt.plot(epochs, losses.val.probs, marker='v', color='red', label="Validation (Predicted Likelihood of True AA)")
-		
-		plt.title('Accuracy vs. Epochs')
-		plt.xlabel('Epochs')
-		plt.ylabel('Accuracy')
-		plt.legend()
-		plt.grid(True)
-		plt.savefig(self.acc_plot)
-		self.log.info(f"plot of accuracy vs. epochs saved to {self.acc_plot}")
+		# extract the keys and iterate
+		loss_types = losses.val.losses.keys()
+		for loss_type in loss_types:
+			plt.plot(epochs, losses.train.losses[loss_type], marker='o', color='red', label="Training")
+			plt.plot(epochs, losses.val.losses[loss_type], marker='o', color='blue', label="Validation")
+			plt.title(f'{loss_type} vs. Epochs')
+			plt.xlabel('Epochs')
+			plt.ylabel(loss_type)
+			plt.legend()
+			plt.grid(True)
+			loss_path = self.plot_path / Path(f"{'_'.join(loss_type.lower().split(' '))}.png")
+			plt.savefig(loss_path)
+			self.log.info(f"Plot of {loss_type} vs. Epochs saved to {loss_path}")
+			plt.figure()
 
 	def save_checkpoint(self, model, adam=None, scheduler=None, appended_str=""):
 
-		checkpoint = {	"model": model.module.state_dict(), 
+		checkpoint = {	"model": {	"vae": model.module.vae.state_dict(), 
+									"diffusion": model.module.diffusion.state_dict(), 
+									"classifier": model.module.classifier.state_dict(), 
+						}
 						"adam": (None if adam is None else adam.state_dict()), 
 						"scheduler": (None if scheduler is None else scheduler.state_dict())
 					}
