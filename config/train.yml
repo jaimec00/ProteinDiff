@@ -10,76 +10,48 @@ config: "config/train.yml"
 
 # ------------------------------------------------------------------------------
 
+debug_grad: False
+port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+
+# ------------------------------------------------------------------------------
+
 # hyperparameters
 hyper_parameters:
-
-  # ----------------------------------------------------------------------------
-
-  # main stuff
-  d_model: 128 # d_wf // 2 is the number of wavefunctions defined for each protein, since each wf produces real and imag part
-  top_k: 30
-
-  # ----------------------------------------------------------------------------
-
-  featurizer:
-    voxel_x: 8
-    voxel_y: 12
-    voxel_z: 4
-    cell_unit: 1
-
-  vae:
-    downsample_fac: 4
-
-  diffusion:
-    encoder:
-      layers: 3
-      edge_embedding: # pmpnn does linearly spaced centers, not spreads, will test autoregressive first before changing this
-        min_rbf: 2.0
-        max_rbf: 22.0
-        num_rbfs: 16.0
-    u_net:
-      t_max: 1000
-
-  classifier:
-
-
+  # still testing
 
 # ------------------------------------------------------------------------------
 
 # training params
 training_parameters:
-
   rng: 0 # for data loading
   epochs: 1000  # number of epochs, training until convergence
-
-  checkpoint: ""
-
+  train_type: "vae" # vae or diffusion are the options
+  checkpoint: 
+    path: ""
+    vae: False
+    diff: False
+    adam: False
+    sched: False
   inference:
     temperature: !!float 1e-6
-  
-  # convergence criteria
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
     tolerance: 30 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
-  
   adam:
     beta1: 0.90  # decay rate of momentum term
     beta2: 0.98  # decay rate of variance term
     epsilon: !!float 10e-9  # for numerical stability in param updates (!!float lets PyYAML know this is a float, not str)
     weight_decay: 0.00 # weight decay, set to 0 for no weightdecay, ie regular adam
-
   regularization:
     dropout: 0.10  # percentage of dropout
     noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
     homo_thresh: 0.70
-    label_smoothing: 0.00
-
   loss:
     # i think grad accum is v important for diffusion, will see if this helps
-    accumulation_steps: 1  # grad accumulation; how many batches to process before learning step. i think mlm needs better grad approx, will see
-                            # note that this depends on if doing multi gpu training, if have two gpus with accum=1, then each step occurs after 1 batch per gpu --> 2 batches in this case
+    accumulation_steps: 1
     grad_clip_norm: 0.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
-  
+    label_smoothing: 0.00
+    beta: 1e-3
   lr:
     lr_type: "attn"
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
@@ -89,19 +61,12 @@ training_parameters:
 
 # dataset configs
 data:
-
   data_path: "/scratch/hjc2538/projects/proteusAI/data/multi_chain/processed"  # path to data for multi-chain model (dataset from Dapauras et. al.)
-
   num_train: -1  # number of training samples to use; -1 means all available
   num_val: -1  # number of validation samples to use; -1 means all available
   num_test: -1  # number of test samples to use; -1 means all available
-
-  # want as few batch_size/seq_length combinations as possible to speed up triton, since it 
-  # recompiles the attention kernel for each shape
-  # DataHolder class sorts samples by sequence length and splits into max_batch_size batches one time to reduce masking (avoid small seqs being grouped with large seqs), 
-  # then recursively randomizes order of samples within batch, splits into two, and continues until batches are <= batch_tokens
   max_batch_size: 256  # maximum samples per batch
-  min_seq_size: 16 # minimum sequence length, shorter is padded to this length, this is necessary due to triton matmul, min of 16, but with the option of having larger min
+  min_seq_size: 16 # minimum sequence length, shorter is excluded
   max_seq_size: 16384 # max sequence lengths, longer samples not included
   batch_tokens: 16384 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
@@ -112,16 +77,5 @@ data:
 output:
   out_path: "/scratch/hjc2538/projects/ProteinDiff/models/test"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
-
-# ------------------------------------------------------------------------------
-
-debug:
-  # prints each layers gradients after each step so can check for exploding/vanishing gradients
-  # note that it is printed before grad clipping
-  debug_grad: False # something is wrong with vae and i have no idea what, see what autograd anomoly detector finds
-  print_losses: False
-  print_grad_L2: False
-
-port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------

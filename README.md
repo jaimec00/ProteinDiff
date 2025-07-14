@@ -1,23 +1,25 @@
 # ProteinDiff - Graph-Conditioned Latent Diffusion (work in progress)
 ## Structure Conditioned Protein Sequence Generation
-### summary
+### Summary
+
+ProteinDiff is a graph-conditioned latent diffusion model for protein sequence generation given a target backbone structure. It aims to provide a truly generative model for this problem, by reframing the problem in such a way that the main diffusion model can learn the score of sequence space given a target structure. Here is a summary of the idea in broad strokes:
 
 the input is the N, $C_\alpha$, and C atoms for inference, but for training need all atoms of the protein. 
 
 1. first step is to create the virtual $C_\beta$ atom from empirical constants. 
-2. next step is to define a local coordinate frame for each residue, the y-axis is the vector pointing from $C_\alpha$ to the $C_\beta$, the x-axis is the vector that is pointing from N to C projected onto the plane normal to the y-axis vector, and the z-axis is the cross product of the two.  use virtual $C_\beta$ for frame computation, but true position for electrostatic potential later (no $C_\beta$ for glycine).
-3. using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z (e.g. 16 x 16 x 16, , giving $16\times16\times16\times = 512$ cells, in this case each cell is 0.5**3 $\AA^3$, making the whole voxel 256 $\AA^3$)
+2. next step is to define a local coordinate frame for each residue, the y-axis is the vector pointing from $C_\alpha$ to the $C_\beta$, the x-axis is the vector that is pointing from N to C projected onto the plane normal to the y-axis vector, and the z-axis is the cross product of the two.  use virtual $C_\beta$ for frame computation, but true position for electrostatic field later (no $C_\beta$ for glycine).
+3. using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z$ (e.g. 16 x 16 x 16, , giving $16\times16\times16\times = 512$ cells, in this case each cell is $0.75^3$ $\AA^3$, making the whole voxel 1728 $\AA^3$)
 4. now we compute the topK nearest neighbors of each residue using $C_\alpha$ coordinates. 
-5. for each atom we assign a partial charge using the AMBER-defined partial charges. using modified electric vector field formula, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point. However, in order to avoid the model overfitting to "empty" regions where the amino acid is not present and magnitude is near zero, we normalize the vectors to unit length. This creates a vector field, indicating the direction of the electric field lines.
+5. for each atom we assign a partial charge using the AMBER partial charges from ff19SB. using the electric vector field formula, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point. However, in order to avoid the model overfitting to "empty" regions where the amino acid is not present and magnitude is near zero, we normalize the vectors to unit length. This creates a vector field, indicating the direction of the electric field lines (see below for an example visualization).
 6. here is where it gets interesting.
 
     - Variational Auto Encoder (VAE)
         
-        - the first step is to train a variational autoencoder that learns how to compress the voxelized electric field of each residue, capturing broad and semantic information, such that the it can be reconstructed by the decoder using the sampled latent representation. the vae is pre-trained (along with classifier, but with stop-grad) on the true electric field unit vectors computed from the nearest neighbors' atoms. In this stage, there is no backbone/graph conditioning, the vae only has access to each residues individual voxels, with no cross-talk between residues, besides the initial potential calculation.
+        - the first step is to train a variational autoencoder that learns how to compress the voxelized electric field of each residue, capturing broad and semantic information, such that the it can be reconstructed by the decoder using the sampled latent representation. the vae is pre-trained (along with classifier, but with stop-grad) on the true electric field unit vectors computed from the nearest neighbors' atoms. In this stage, there is no backbone/graph conditioning, the vae only has access to each residues individual voxels, with no cross-talk between residues, besides the initial field calculation.
         
         - Encoder
 
-            - The plan here is to keep it as simple as possible; planning to downsample the voxel 4X with downsampling convolutions. while increasing feature dim (starting point is one feature, the scalar electric potential at each cell). pass the downsampled voxels through an MLP to get mean and logvars, then sample a latent (Z). Note that a KL-Divergence term is added to regularize the latent space, probably tiny. 
+            - The plan here is to keep it as simple as possible; planning to downsample the voxel 4X with downsampling convolutions. while increasing feature dim (starting point is three features, the electric field unit vectors at each cell). pass the downsampled voxels through a linear layer to get mean and logvars, then sample a latent (Z). Note that a KL-Divergence term is added to regularize the latent space, probably tiny. 
 
         - Decoder
 

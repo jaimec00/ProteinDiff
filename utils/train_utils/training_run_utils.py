@@ -119,8 +119,67 @@ class Batch():
 		# move batch to gpu
 		self.move_to(self.epoch_parent.training_run_parent.gpu)
 
-		# get model outputs and losses
-		self.get_outputs()
+		# utils
+		model = epoch.training_run_parent.model.module			
+		loss_function = self.epoch_parent.training_run_parent.losses.loss_function
+
+		# for vae training
+		if self.train_type=="vae":
+			
+			# get the fields
+			_, fields, _, _ = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
+
+			# get the encoder latents and decoder field predictions 
+			latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
+
+			# predict sequence from fields
+			seq_pred = model.classifier(fields_pred.detach()) # detach so classifier loss doesnt affect vae
+
+			# compute loss
+			losses = loss_function.vae(latent_mu, latent_logvar, fields_pred, fields, seq_pred, self.labels, self.loss_mask)
+
+		# diffusion training
+		elif self.train_type=="diffusion":
+
+			# inference only applicable after train diffusion
+			if self.inference:
+
+				# get coords and neighbors
+				coords_bb = model.prep.get_backbone(self.coords)
+				nbrs, nbr_mask = model.prep.get_neighbors(coords_bb, self.valid_mask)
+
+				# generate a latent from white noise
+				generated_latent = model.diffusion.generate(coords_bb, nbrs, nbr_mask)
+
+				# predict the fields from generated latent
+				fields_pred = model.vae.dec(generated_latent)
+
+				# predict sequence
+				seq_pred = model.classifier(fields_pred)
+
+				# compute loss
+				losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
+			
+			else:
+
+				# run the prep to get the fields
+				coords_bb, fields, nbrs, nbr_mask = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
+
+				# sample a latent
+				latent, latent_mu, latent_logvar = model.vae.enc(fields)
+
+				# get random timesteps and noise the latent
+				t = model.diffusion.get_rand_t_for(latent)
+				latent_noised, noise = model.diffusion.noise(latent, t)
+
+				# predict noise
+				noise_pred = model.diffusion(latent_noised, t, nbrs, nbr_mask)
+
+				# compute loss
+				losses = loss_function.diff(noise_pred, noise, self.loss_mask)
+
+		# add the losses to the temporary losses
+		self.epoch_parent.training_run_parent.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())
 
 	def batch_backward(self):
 
@@ -158,39 +217,3 @@ class Batch():
 
 		# add noise
 		self.coords = self.coords + noise
-
-	def get_outputs(self):
-		'''
-		used to get output predictions
-		'''
-
-		model = epoch.training_run_parent.model.module			
-		loss_function = self.epoch_parent.training_run_parent.losses.loss_function
-
-		if self.train_type=="vae":
-
-			_, fields, _, _ = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
-			latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
-			seq_pred = model.classifier(fields_pred.detach()) # detach so classifier loss doesnt affect vae
-			losses = loss_function.vae(latent_mu, latent_logvar, fields_pred, fields, seq_pred, self.labels, self.loss_mask)
-
-
-		elif self.train_type=="diffusion":
-
-			if self.inference:
-				coords_bb = model.prep.get_backbone(self.coords)
-				nbrs, nbr_mask = model.prep.get_neighbors(coords_bb, self.valid_mask)
-				generated_latent = model.diffusion.generate(coords_bb, nbrs, nbr_mask)
-				fields_pred = model.vae.dec(generated_latent)
-				seq_pred = model.classifier(fields_pred)
-				losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
-			
-			else:
-				coords_bb, fields, nbrs, nbr_mask = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
-				latent, latent_mu, latent_logvar = model.vae.enc(fields)
-				t = model.diffusion.get_rand_t_for(latent)
-				latent_noised, noise = model.diffusion.noise(latent, t)
-				noise_pred = model.diffusion(latent_noised, t, nbrs, nbr_mask)
-				losses = loss_function.diff(noise_pred, noise, self.loss_mask)
-
-		self.epoch_parent.training_run_parent.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())

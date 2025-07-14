@@ -216,17 +216,14 @@ class DataBatch():
 		# init the chain_mask
 		chain_mask = torch.zeros(epoch_biounits[idx].labels.shape, dtype=torch.bool, device=device)
 
-		# loop through chains
-		for start, end in epoch_biounits[idx].chain_idxs[epoch_biounits.chains[idx]]:
-			chain_mask[start:end] = True
-
 		# get seq sims between chains to determine homo
 		seq_sims = epoch_biounits[idx].seq_sims[epoch_biounits.chains[idx]]
 		homo_chains = [chain for chain, seq_sim in seq_sims.items() if seq_sim > homo_thresh] # list of chain identifiers whose tm score is greater than the threshold compared to the representative chain
 		homo_idxs = [epoch_biounits[idx].chain_idxs[chain] for chain in homo_chains]
+		self_idxs = [epoch_biounits[idx].chain_idxs[epoch_biounits.chains[idx]]]
 		
-		# loop through homo chains
-		for chain_copies in homo_idxs:
+		# loop through homo chains and self chains, since single chain biounits might not have seq sims
+		for chain_copies in homo_idxs + self_chains:
 			for start, stop in chain_copies:
 				chain_mask[start:stop] = True
 
@@ -501,7 +498,7 @@ class DataCleaner():
 			# split into chunks and send different subset of pdbs to each gpu 
 			all_pdbs = self.cluster_info.PDB.drop_duplicates()
 
-			# store each processes's results (dataframe that maps chainid to biounit) in list
+			# store each processes's results (dataframe that maps chainid to biounit(s)) in list
 			pdb_biounits = {}
 
 			# parallel execution		
@@ -658,7 +655,7 @@ class DataCleaner():
 		biounit_data = {
 			"coords": coords, # N x 14 x 3
 			"labels": labels, # N,
-			"mask": mask, # N x 14
+			"atom_mask": mask, # N x 14
 			"chain_idxs": chain_idxs, # {CHAINID: [start, end(exclusive)]}
 			"seq_sims": seq_sims, # {query_chain1: {target_chain1: score, target_chain2: score}, query_chain2: {target_chain1: score, target_chain2: score}} etc
 			"asmb_xforms": asmb_xforms

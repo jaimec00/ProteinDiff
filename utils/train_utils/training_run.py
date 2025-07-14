@@ -66,7 +66,7 @@ class TrainingRun():
 		self.world_size = int(world_size)
 		self.gpu = torch.device(f'cuda:{local_rank}')
 		self.cpu = torch.device("cpu")
-		self.debug = args.debug
+		self.debug = args.debug_grad
 
 		self.setup_training(args)
 		self.train()
@@ -98,11 +98,9 @@ class TrainingRun():
 							)
 		
 		self.losses = TrainingRunLosses(	args.training_parameters.train_type,
-											args.training_parameters.losses.classifier.label_smoothing, 
-											args.training_parameters.losses.vae.beta,
-											args.training_parameters.losses.cos.beta,
-											args.training_parameters.losses.diff.mse,
-									)
+											args.training_parameters.losses.label_smoothing, 
+											args.training_parameters.losses.beta,
+										)
 
 		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints, rank=self.rank, world_size=self.world_size)
 
@@ -140,11 +138,14 @@ class TrainingRun():
 		# load any checkpoints
 		if self.checkpoint:
 			state_dicts = self.checkpoint["model"]
-			self.model.module.vae.load_state_dict(state_dicts["vae"])
-			self.model.module.classifier.load_state_dict(state_dicts["classifier"])
-			if self.training_parameters.train_type=="diffusion":
+			if self.training_parameters.checkpoint.vae:
+				self.model.module.vae.load_state_dict(state_dicts["vae"])
+				self.model.module.classifier.load_state_dict(state_dicts["classifier"])
+			if self.training_parameters.checkpoint.diffusion:
 				self.model.module.diffusion.load_state_dict(state_dicts["diffusion"])
 
+		# set all to evaluation mode, Epoch switches only relevant modules, so this freezes the rest, e.g. when training diffusion on frozen vae
+		self.model.module.eval()
 
 		# get number of parameters for logging
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.module.parameters())
@@ -177,7 +178,7 @@ class TrainingRun():
 										betas=(self.training_parameters.adam.beta1, self.training_parameters.adam.beta2), 
 										eps=float(self.training_parameters.adam.epsilon), weight_decay=self.training_parameters.adam.weight_decay)
 		self.optim.zero_grad()
-		if self.checkpoint:
+		if self.checkpoint and self.training_parameters.checkpoint.adam:
 			self.optim.load_state_dict(self.checkpoint["adam"], weights_only=True, map_location=self.gpu)
 
 	def setup_scheduler(self):
@@ -216,7 +217,7 @@ class TrainingRun():
 		else:
 			raise ValueError(f"invalid lr_type: {self.training_parameters.lr.lr_type}. options are ['attn', 'static']")
 
-		if self.checkpoint:
+		if self.checkpoint and self.training_parameters.checkpoint.sched:
 			self.scheduler.load_state_dict(self.checkpoint["scheduler"])
 
 	def model_checkpoint(self, epoch_idx):

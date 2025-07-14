@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from data.constants import amber_partial_charges, aa_2_lbl, coulomb_constant
+from data.constants import amber_partial_charges, aa_2_lbl
 
 class PreProcesser(nn.Module):
 	
@@ -13,8 +13,7 @@ class PreProcesser(nn.Module):
 		voxel_z = torch.arange(z_cells).view(1,1,-1).expand(voxel_dims) - z_cells/2
 		voxel = cell_dim * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
 		self.register_buffer("voxel", voxel)
-		self.res = cell_dim #(3*(cell_dim**2))**0.5
-
+		self.res = cell_dim 
 		self.top_k = top_k
 
 	def forward(self, C, L, atom_mask, valid_mask):
@@ -95,24 +94,23 @@ class PreProcesser(nn.Module):
 
 		return local_voxels
 
-	def get_neighbors(self, C, mask):
+	def get_neighbors(self, C, valid_mask):
+
+		# prep
 		Ca = C[:, :, 1, :]
 		Z, N, S = Ca.shape
-		top_k = self.top_k
-		# if N<=self.top_k:
-		# 	Ca = torch.cat([Ca, torch.zeros(Z, self.top_k-N, S)], dim=1)
-		# 	mask = torch.cat([Ca, torch.zeros(Z, self.top_k-N, S)], dim=1)
+		assert N > self.top_k
 
 		# get distances
 		dists = torch.sqrt(torch.sum((Ca.unsqueeze(1) - Ca.unsqueeze(2))**2, dim=3)) # Z x N x N
-		dists = torch.where((dists==0) | (~mask).unsqueeze(2), float("inf"), dists) # Z x N x N
+		dists = torch.where((dists==0) | (~valid_mask).unsqueeze(2), float("inf"), dists) # Z x N x N
 		
 		# get topk 
 		nbrs = dists.topk(top_k, dim=2, largest=False) # Z x N x K
 
 		# masked nodes have themselves as edges, masked edges are the corresponding node
 		node_idxs = torch.arange(N, device=dists.device).view(1,-1,1) # 1 x N x 1
-		nbr_mask = ~(mask.unsqueeze(2) | torch.gather(mask.unsqueeze(2).expand(-1,-1,top_k), 1, nbrs.indices))
+		nbr_mask = valid_mask.unsqueeze(2) & torch.gather(valid_mask.unsqueeze(2).expand(-1,-1,self.top_k), 1, nbrs.indices)
 		nbr_mask = nbr_mask & (nbrs.values!=0) # exclude self and distant neighbors
 		nbrs = torch.where(nbr_mask, nbrs.indices, node_idxs) # Z x N x K
 
@@ -143,12 +141,11 @@ class PreProcesser(nn.Module):
 		# now get distance vectors, as directionality is also used. points from neighbor atoms TO voxel cells
 		dist_vectors =  voxels.view(Z, N, 1, Vx, Vy, Vz, 1, S) - C_nbrs.view(Z, N, K, 1, 1, 1, A, S) # Z,N,K,Vx,Vy,Vz,A,S 
 
-		# compute magnitudes, clamp to 2 times the cell resolution (default is 1 A^3), so atoms inside a cell arent overweighted, makes the field look more continuous
+		# compute magnitudes
 		dists = torch.linalg.vector_norm(dist_vectors, dim=7, keepdim=True) # Z,N,K,Vx,Vy,Vz,A,1
 
-		# the distance term is the r^{hat} / |r|^2 = r / |r|^3
-		# however, using r^{hat} / |r| = r / |r|^2, since this led to more continuous field, using |r|^3 clustered the field around atoms within the voxel
-		dist_term = dist_vectors / (dists.masked_fill(dists==0,1)*(dists.clamp(min=self.res*1)**2)) # Z,N,K,Vx,Vy,Vz,A,S
+		# the distance term is the r^{hat} / |r|^2 = r / |r|^3. first dist is to make into unit vector, dist**2 is clamped to the cell resolution to avoid singularities
+		dist_term = dist_vectors / (dists.masked_fill(dists==0,1)*(dists.clamp(min=self.res)**2)) # Z,N,K,Vx,Vy,Vz,A,S
 
 		# get partial charges, zero out masked atoms
 		partial_charges = torch.gather(amber_partial_charges.view(1,1,AA,A).expand(Z,N,AA,A), 2, L.view(Z,N,1,1).expand(Z,N,1,A)) * atom_mask.unsqueeze(2) # Z, N, 1, A

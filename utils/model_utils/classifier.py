@@ -30,12 +30,12 @@ class Classifier(nn.Module):
                                         nn.SiLU(),
                                         
                                         # downsample 1x1x1
-                                        nn.Conv3d(128, 256, 3, stride=2, padding=1, bias=False),
+                                        nn.Conv3d(128, 128, 3, stride=2, padding=1, bias=False),
                                         nn.GroupNorm(32, 256),
 
                                     ) 
 
-        self.classify = nn.Linear(256, len(canonical_aas))
+        self.classify = nn.Linear(128, len(canonical_aas))
 
 
     def forward(self, fields):
@@ -46,7 +46,7 @@ class Classifier(nn.Module):
         # output is Z*N, Cout, 1,1,1 so reshape to Z,N,Cout
         fields = fields.view(Z, N, -1)
 
-        # project to amino acids, Z,N, 20
+        # project to amino acids, Z,N,20
         aas = self.classify(fields)
 
         return aas

@@ -24,8 +24,9 @@ class TrainingRunLosses():
 
 	def set_inference_losses(self, train_type):
 
+		# inference mode only applicable after train vae and diffusion
 		if train_type=="vae":
-			self.clear_tmp_losses()
+			self.clear_tmp_losses() # 
 		elif train_type=="diffusion":
 			self.tmp.losses = {	"Cross Entropy Loss": [],
 								"Top 1 Accuracy": [],
@@ -70,7 +71,7 @@ class Losses():
 
 	def get_avg(self):
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
-		losses = {loss_type: sum(loss.item() for loss_type, loss in self.losses.items()) / self.valid_toks}
+		losses = {loss_type: sum(loss.item() for loss in loss_list) / self.valid_toks for loss_type, loss_list in self.losses.items()}
 		return losses
 
 	def add_losses(self, losses, valid_toks=1):
@@ -104,6 +105,7 @@ class LossFunction():
 
 	def __init__(self, label_smoothing=0.0, beta=1e-3):
 		self.cel_raw = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=label_smoothing)
+		self.beta = beta
 
 	def kl_div(self, latent_mean, latent_logvar, mask):
 
@@ -134,7 +136,7 @@ class LossFunction():
 	def cel(self, seq_pred, seq_true, mask):
 		Z, N, AA = seq_pred.shape
 		seq_true = seq_true.masked_fill(~mask, -1)
-		cel = self.cel(seq_pred.view(-1, AA), seq_true.view(-1))
+		cel = self.cel_raw(seq_pred.view(-1, AA), seq_true.view(-1))
 		return cel
 
 	def compute_matches(self, seq_pred, seq_true, mask):
@@ -157,10 +159,8 @@ class LossFunction():
 		return matches1, matches3, matches5
 
 	def compute_probs(self, seq_pred, seq_true, mask):
-
 		probs = torch.softmax(seq_pred, dim=2)
 		probs_sum = (mask.unsqueeze(2)*torch.gather(probs, 2, (seq_true*mask).unsqueeze(2))).sum()
-
 		return probs_sum
 
 	def vae(self, latent_mean, latent_logvar, fields_pred, fields_true, seq_pred, seq_true, mask):
@@ -171,7 +171,7 @@ class LossFunction():
 		matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true, mask)
 		probs = self.compute_probs(seq_pred, seq_true, mask)
 
-		full_loss = beta*kl_div + cosine_similiarity + cel
+		full_loss = self.beta*kl_div + cosine_similiarity + cel
 
 		losses = {	"Full Loss": full_loss
 					"KL Divergence": kl_div,
