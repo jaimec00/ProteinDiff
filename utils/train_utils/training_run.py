@@ -139,7 +139,7 @@ class TrainingRun():
 			if self.training_parameters.checkpoint.vae:
 				self.model.module.vae.load_state_dict(state_dicts["vae"])
 				self.model.module.classifier.load_state_dict(state_dicts["classifier"])
-			if self.training_parameters.checkpoint.diffusion:
+			if self.training_parameters.checkpoint.diff:
 				self.model.module.diffusion.load_state_dict(state_dicts["diffusion"])
 
 		# set all to evaluation mode, Epoch switches only relevant modules, so this freezes the rest, e.g. when training diffusion on frozen vae

@@ -11,7 +11,7 @@ config: "config/train.yml"
 # ------------------------------------------------------------------------------
 
 debug_grad: False
-port: 29501 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------
 
@@ -25,10 +25,10 @@ hyper_parameters:
 training_parameters:
   rng: 0 # for data loading
   epochs: 1000  # number of epochs, training until convergence
-  train_type: "vae" # vae or diffusion are the options
+  train_type: "diffusion" # vae or diffusion are the options
   checkpoint: 
-    path: ""
-    vae: False
+    path: "/work/hcardenas1/projects/ProteinDiff/models/vae2/checkpoint_e39_s0.28.pth"
+    vae: True
     diff: False
     adam: False
     sched: False
@@ -50,7 +50,7 @@ training_parameters:
     accumulation_steps: 1
     grad_clip_norm: 0.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
     label_smoothing: 0.00
-    beta: !!float 1e-3
+    beta: !!float 5e-4
   lr:
     lr_type: "attn"
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
@@ -74,7 +74,7 @@ data:
 
 # Output
 output:
-  out_path: "/work/hcardenas1/projects/ProteinDiff/models/vae"
+  out_path: "/work/hcardenas1/projects/ProteinDiff/models/diffusion"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

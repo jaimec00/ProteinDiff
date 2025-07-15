@@ -172,7 +172,7 @@ class Batch():
 				latent_noised, noise = model.diffusion.noise(latent, t)
 
 				# predict noise
-				noise_pred = model.diffusion(coords_bb, latent_noised, t)
+				noise_pred = model.diffusion(coords_bb, latent_noised, t, self.valid_mask)
 
 				# compute loss
 				losses = loss_function.diff(noise_pred, noise, self.loss_mask)

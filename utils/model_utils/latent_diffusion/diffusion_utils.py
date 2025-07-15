@@ -15,23 +15,25 @@ class StructureEncoder(nn.Module):
 		self.register_buffer("rbf_centers", torch.linspace(min_rbf, max_rbf, num_rbf))
 		self.spread = (max_rbf - min_rbf) / num_rbf
 
-		self.edge_norm = nn.LayerNorm(d_model)
+		self.edge_norm = nn.LayerNorm(4*4*num_rbf)
 		self.edge_proj = nn.Linear(4*4*num_rbf, d_model)
 
 		self.encs = nn.ModuleList([MPNN(d_model, update_edges=True, dropout=dropout) for _ in range(layers)])
 
-	def forward(C_backbone, L, valid_mask):
+		self.top_k = top_k
 
-		Z, N, _ = C_backbone.shape
+	def forward(self, C_backbone, valid_mask):
+
+		Z, N, _, _ = C_backbone.shape
 
 		V = self.V_start.view(1,1,-1).expand(Z, N, -1)
-		nbrs, nbr_mask = self.get_neighbors(C, valid_mask)
+		nbrs, nbr_mask = self.get_neighbors(C_backbone, valid_mask)
 		E = self.get_edges(C_backbone, nbrs)
 
 		for enc in self.encs:
 			V, E = enc(V, E, nbrs, nbr_mask)
 
-		return V, E, K
+		return V, E, nbrs, nbr_mask
 
 	def get_neighbors(self, C, valid_mask):
 
@@ -55,18 +57,18 @@ class StructureEncoder(nn.Module):
 
 		return nbrs, nbr_mask
 
-	def get_edges(C_backbone, nbrs):
+	def get_edges(self, C_backbone, nbrs):
 
-		Z, N, S = C_backbone.shape
+		Z, N, A, S = C_backbone.shape
 		_, _, K = nbrs.shape
 
-		C_nbrs = torch.gather(C_backbone.unsqueeze(2).expand(Z, N, K, S), 1, nbrs.unsqueeze(3).expand(Z, N, K, S)) # Z,N,K,S
+		C_nbrs = torch.gather(C_backbone.unsqueeze(2).expand(Z, N, K, A, S), 1, nbrs.view(Z,N,K,1,1).expand(Z, N, K, A, S)) # Z,N,K,A,S
 
-		dists = torch.sqrt(torch.sum((C_backbone.unsqueeze(2) - C_nbrs)**2), dim=3) # Z,N,1,S - Z,N,K,S --> Z,N,K
+		dists = torch.sqrt(torch.sum((C_backbone.view(Z,N,1,A,1,S) - C_nbrs.view(Z,N,K,1,A,S))**2, dim=-1)) # Z,N,1,A,1,S - Z,N,K,1,A,S --> Z,N,K,A,A
 
-		rbf_numerator = (dists.view(Z, N, K, 1) - self.rbf_centers.view(1,1,1,-1))**2
+		rbf_numerator = (dists.view(Z, N, K, A, A, 1) - self.rbf_centers.view(1,1,1,1,1,-1))**2 # Z,N,K,A,A,S
 
-		rbf = torch.exp(-rbf_numerator / (self.spread**2))
+		rbf = torch.exp(-rbf_numerator / (self.spread**2)).reshape(Z,N,K,-1)
 
 		edges = self.edge_proj(self.edge_norm(rbf))
 
@@ -146,11 +148,11 @@ class LatentEncoder(nn.Module):
 
 		self.feature_conv = nn.Sequential(
 											nn.Conv3d(d_latent, d_model//4, 2, stride=1, padding="same", bias=False),
-											nn.GroupNorm(d_model//4, d_model),
+											nn.GroupNorm(d_model//64, d_model//4),
 											nn.SiLU(),
 
 											nn.Conv3d(d_model//4, d_model//2, 2, stride=1, padding="same", bias=False),
-											nn.GroupNorm(d_model//8, d_model),
+											nn.GroupNorm(d_model//32, d_model//2),
 											nn.SiLU(),
 
 											nn.Conv3d(d_model//2, d_model, 2, stride=1, padding="same", bias=False),
@@ -166,22 +168,22 @@ class LatentEncoder(nn.Module):
 
 
 class GraphUpdater(nn.Module):
-	def __init__(self, d_model):
+	def __init__(self, d_model=128):
 		super().__init__()
 
 		self.collapse_latent = nn.Sequential(   
-												# downsample to 2x2x2
-												nn.Conv3d(d_model, d_model, 2, stride=2, padding=1, bias=False),
+												# downsample to 1x1x1
+												nn.Conv3d(d_model, d_model, 2, stride=2, padding=0, bias=False),
 												nn.GroupNorm(d_model//16, d_model),
 												nn.SiLU(),
 
 												# downsample to 1x1x1
-												nn.Conv3d(d_model, d_model, 2, stride=2, padding=1, bias=False),
+												nn.Conv3d(d_model, d_model, 2, stride=2, padding=0, bias=False),
 												nn.GroupNorm(d_model//16, d_model),
 												nn.SiLU(),
 
 												# project one last time
-												nn.Conv3d(d_model, d_model, 1, stride=1, padding="same", bias=False)
+												nn.Conv3d(d_model, d_model, 1, stride=1, padding="same", bias=True)
 									)
 
 		self.latent_conditioning = FiLM(d_model=d_model, d_hidden=d_model, hidden_layers=1, dropout=0.0)
@@ -233,9 +235,10 @@ class DiT(nn.Module):
 		ZN, d_model, Vx, Vy, Vz = latent.shape
 		latent = latent.reshape(ZN, d_model, Vx*Vy*Vz).permute(0,2,1) #Z*N, Vx*Vy*Vz, d_model
 		nodes = nodes.reshape(ZN, 1, d_model)
+		t = t.reshape(ZN,1,d_model)
 
 		# conditioning
-		conditioning = nodes + timestep.view(-1,1,1)
+		conditioning = nodes + t
 		alpha1, gamma1, beta1 = self.attn_norm(conditioning)
 		alpha2, gamma2, beta2 = self.ffn_norm(conditioning)
 		
@@ -274,6 +277,7 @@ class SelfAttention(nn.Module):
 
 	def forward(self, latent):
 
+		Z, N, d_model = latent.shape
 
 		# project the tensors
 		Q = torch.matmul(latent.unsqueeze(1), self.q_proj.unsqueeze(0)) + self.q_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
@@ -287,7 +291,7 @@ class SelfAttention(nn.Module):
 
 		# cat heads
 		out = out.permute(0,2,3,1) # batch x N x d_k x heads
-		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x heads --> batch x N x d_model
+		out = out.reshape(Z, N, self.d_model) # batch x N x d_k x heads --> batch x N x d_model
 
 		# project through final linear layer
 		out = self.out_proj(out) # batch x N x d_model --> batch x N x d_model
