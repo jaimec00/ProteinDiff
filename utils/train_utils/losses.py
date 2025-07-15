@@ -56,7 +56,7 @@ class Losses():
 			self.losses = {"Mean Squared Error": []}
 		elif train_type=="vae":
 			self.losses = {	
-							"Full Loss": []
+							"Full Loss": [],
 							"Cosine Similarity": [],
 							"KL Divergence": [],
 							"Cross Entropy Loss": [],
@@ -71,7 +71,7 @@ class Losses():
 
 	def get_avg(self):
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
-		losses = {loss_type: sum(loss.item() for loss in loss_list) / self.valid_toks for loss_type, loss_list in self.losses.items()}
+		losses = {loss_type: sum(loss.item() for loss in loss_list) / self.valid_toks.item() for loss_type, loss_list in self.losses.items()}
 		return losses
 
 	def add_losses(self, losses, valid_toks=1):
@@ -80,9 +80,14 @@ class Losses():
 		self.valid_toks += valid_toks
 
 	def extend_losses(self, other):
+		other.to(self.valid_toks.device)
 		for loss_type, losses in other.losses.items():
 			self.losses[loss_type].extend(losses)
 		self.valid_toks += other.valid_toks
+
+	def to(self, device):
+		self.losses = {loss_type: [loss.to(device) for loss in losses] for loss_type, losses in self.losses.items()}
+		self.valid_toks = self.valid_toks.to(device)
 
 	def clear_losses(self):
 		self.losses = {loss_type: [] for loss_type in self.losses.keys()}
@@ -123,7 +128,7 @@ class LossFunction():
 		cosine_similiarity = 1 - torch.sum(fields_pred * fields_true, dim=2) # Z,N,3,Vx,Vy,Vz --> Z,N,Vx,Vy,Vz
 		
 		# sum across valid samples and divide by number of cells
-		cosine_similiarity = torch.sum(cosine_similiarity * mask.view(Z,N,1,1,1,1)) / (Vx*Vy*Vz)
+		cosine_similiarity = torch.sum(cosine_similiarity * mask.view(Z,N,1,1,1)) / (Vx*Vy*Vz)
 
 		return cosine_similiarity
 
@@ -151,10 +156,11 @@ class LossFunction():
 		top5 = torch.topk(seq_pred, 5, 2, largest=True, sorted=False).indices.view(-1, 5) # Z*N x 5
 
 		true_flat = seq_true.view(-1) # Z x N --> Z*N,
+		mask_flat = mask.view(-1)
 
-		matches1 = ((top1 == true_flat) & mask).sum() # 1, 
-		matches3 = ((top3 == true_flat[:, None]).any(dim=1) & mask).sum() # 1, 
-		matches5 = ((top5 == true_flat[:, None]).any(dim=1) & mask).sum() # 1, 
+		matches1 = ((top1 == true_flat) & mask_flat).sum() # 1, 
+		matches3 = ((top3 == true_flat[:, None]).any(dim=1) & mask_flat).sum() # 1, 
+		matches5 = ((top5 == true_flat[:, None]).any(dim=1) & mask_flat).sum() # 1, 
 
 		return matches1, matches3, matches5
 
@@ -173,13 +179,13 @@ class LossFunction():
 
 		full_loss = self.beta*kl_div + cosine_similiarity + cel
 
-		losses = {	"Full Loss": full_loss
+		losses = {	"Full Loss": full_loss,
 					"KL Divergence": kl_div,
 					"Cosine Similarity": cosine_similiarity,
 					"Cross Entropy Loss": cel,					
 					"Top 1 Accuracy": matches1,
 					"Top 3 Accuracy": matches3,
-					"Top 5 Accuracy": macthes5,
+					"Top 5 Accuracy": matches5,
 					"True AA Predicted Probability": probs
 				}
 

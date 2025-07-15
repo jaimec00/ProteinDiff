@@ -4,7 +4,7 @@ from data.constants import amber_partial_charges, aa_2_lbl
 
 class PreProcesser(nn.Module):
 	
-	def __init__(self, top_k=16, voxel_dims=(16,16,16), cell_dim=1.0):
+	def __init__(self, voxel_dims=(16,16,16), cell_dim=1.0):
 		super().__init__()
 
 		x_cells, y_cells, z_cells = voxel_dims
@@ -13,15 +13,14 @@ class PreProcesser(nn.Module):
 		voxel_z = torch.arange(z_cells).view(1,1,-1).expand(voxel_dims) - z_cells/2
 		voxel = cell_dim * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
 		self.register_buffer("voxel", voxel)
+		self.register_buffer("amber_partial_charges", amber_partial_charges)
 		self.res = cell_dim 
-		self.top_k = top_k
 
-	def forward(self, C, L, atom_mask, valid_mask):
+	def forward(self, C, L, atom_mask):
 		'''
 		C (torch.Tensor): full atomic coordinates of shape (Z,N,A,3)
 		L (torch.Tensor): amino acid class labels of shape (Z,N)
 		atom_mask (torch.Tensor): mask indicating missing atom coordinates of shape (Z,N,A)
-		kp_mask (torch.Tensor): mask indicating padded positions of shape (Z,N)
 		'''
 
 		# no gradients here, as that would blow everything up, and this is all physics-based preprocessing, no learning
@@ -37,13 +36,10 @@ class PreProcesser(nn.Module):
 			# simply contains the coordinates for the voxels
 			local_voxels = self.compute_voxels(local_origins, local_frames) # Z,N,Vx,Vy,Vz,3
 
-			# compute the nearest neighbors
-			nbrs, nbr_mask = self.get_neighbors(C_backbone, valid_mask) # use Ca coords
-
 			# compute electric fields 
-			fields = self.compute_fields(C, L, local_voxels, nbrs, nbr_mask, atom_mask)
+			fields = self.compute_fields(C, L, local_voxels, atom_mask)
 
-		return C_backbone, fields, nbrs, nbr_mask 
+		return C_backbone, fields
 
 	def get_backbone(self, C):
 
@@ -64,12 +60,12 @@ class PreProcesser(nn.Module):
 	def compute_frames(self, C_backbone):
 
 		y = C_backbone[:, :, 3, :] - C_backbone[:, :, 1, :] # Cb - Ca
-		y_unit = y / torch.linalg.vector_norm(y, dim=2, keepdim=True).clamp(1e-6)
+		y_unit = y / torch.linalg.vector_norm(y, dim=2, keepdim=True).clamp(min=1e-6)
 
 		x_raw = C_backbone[:, :, 2, :] - C_backbone[:, :, 0, :] # C - N
 		x_proj = torch.linalg.vecdot(x_raw, y_unit, dim=2) # project x_raw onto y
 		x = x_raw - x_proj.unsqueeze(2) # subtract the projection from the original vector to get the projection of x onto the plane perpendicular to y
-		x_unit = x / torch.linalg.vector_norm(x, dim=2, keepdim=True).clamp(1e-6)
+		x_unit = x / torch.linalg.vector_norm(x, dim=2, keepdim=True).clamp(min=1e-6)
 
 		z_unit = torch.linalg.cross(x_unit, y_unit) # already a unit vector, since x and y are already unit
 
@@ -86,77 +82,41 @@ class PreProcesser(nn.Module):
 		_, _, U, _ = frames.shape # U is the unit vectors dim
 		Vx, Vy, Vz, _ = self.voxel.shape
 
-		# rotate the voxel grid using the local frames, each unit vector (Uxyz) is multipled by the corresponding component
+		# rotate the voxel grid using the local frames, each unit vector (Uxyz) is multipled by the corresponding component and summed across U dim
 		rotation = torch.sum(frames.view(Z,N,1,1,1,U,S) * self.voxel.view(1,1,Vx,Vy,Vz,S,1), dim=5) # Z,N,Vx,Vy,Vz,U
 
 		# add the offset so the origin is the beta carbon
 		local_voxels = origins.view(Z,N,1,1,1,S) + rotation # Z,N,Vx,Vy,Vz,S
 
 		return local_voxels
-
-	def get_neighbors(self, C, valid_mask):
-
-		# prep
-		Ca = C[:, :, 1, :]
-		Z, N, S = Ca.shape
-		assert N > self.top_k
-
-		# get distances
-		dists = torch.sqrt(torch.sum((Ca.unsqueeze(1) - Ca.unsqueeze(2))**2, dim=3)) # Z x N x N
-		dists = torch.where((dists==0) | (~valid_mask).unsqueeze(2), float("inf"), dists) # Z x N x N
 		
-		# get topk 
-		nbrs = dists.topk(top_k, dim=2, largest=False) # Z x N x K
-
-		# masked nodes have themselves as edges, masked edges are the corresponding node
-		node_idxs = torch.arange(N, device=dists.device).view(1,-1,1) # 1 x N x 1
-		nbr_mask = valid_mask.unsqueeze(2) & torch.gather(valid_mask.unsqueeze(2).expand(-1,-1,self.top_k), 1, nbrs.indices)
-		nbr_mask = nbr_mask & (nbrs.values!=0) # exclude self and distant neighbors
-		nbrs = torch.where(nbr_mask, nbrs.indices, node_idxs) # Z x N x K
-
-		return nbrs, nbr_mask
-		
-	def compute_fields(self, C, L, voxels, nbrs, nbr_mask, atom_mask):
+	def compute_fields(self, C, L, voxels, atom_mask):
 
 		# prep
 		Z, N = L.shape
 		AA, A = amber_partial_charges.shape
 		_, _, Vx, Vy, Vz, S = voxels.shape
-
-		# include self in neighbors
-		nbrs = torch.cat([nbrs, torch.arange(N, device=nbrs.device, dtype=nbrs.dtype).view(1,N,1).expand(Z,N,1)], dim=2)
-		nbr_mask = torch.cat([nbr_mask, torch.ones(Z,N,1,device=nbr_mask.device, dtype=nbr_mask.dtype)], dim=2)
-		_, _, K = nbrs.shape
 		
-		# replace invalid labels with X
+		# replace invalid labels with X (has the same partial charges as glycine)
 		L = L.masked_fill(L==-1, aa_2_lbl("X")) 
 
-		# compute the electric field, using just basic point charge formula, might move to screened coloumb if i dont like the visualization
-		# note that this will be a Vx, Vy, Vz, 3 tensor for each residue, as there is directionality involved. also makes it easier to use 
-		# image processing techniques, as there are usually rgb channels, e.g. could downsample from 8x8x4x3 to 4x4x2x4
+		# compute the electric field, using just basic point charge formula
 
-		# first get the coordinates of the neighbor atoms
-		C_nbrs = torch.gather(C.unsqueeze(2).expand(Z, N, K, A, S), 1, nbrs.view(Z, N, K, 1, 1).expand(Z, N, K, A, S))
-
-		# now get distance vectors, as directionality is also used. points from neighbor atoms TO voxel cells
-		dist_vectors =  voxels.view(Z, N, 1, Vx, Vy, Vz, 1, S) - C_nbrs.view(Z, N, K, 1, 1, 1, A, S) # Z,N,K,Vx,Vy,Vz,A,S 
+		# now get distance vectors, as directionality is also used. points from atoms TO voxel cells
+		dist_vectors =  voxels.view(Z, N, Vx, Vy, Vz, 1, S) - C.view(Z, N, 1, 1, 1, A, S) # Z,N,Vx,Vy,Vz,A,S 
 
 		# compute magnitudes
-		dists = torch.linalg.vector_norm(dist_vectors, dim=7, keepdim=True) # Z,N,K,Vx,Vy,Vz,A,1
+		dists = torch.linalg.vector_norm(dist_vectors, dim=-1, keepdim=True) # Z,N,Vx,Vy,Vz,A,1
 
 		# the distance term is the r^{hat} / |r|^2 = r / |r|^3. first dist is to make into unit vector, dist**2 is clamped to the cell resolution to avoid singularities
-		dist_term = dist_vectors / (dists.masked_fill(dists==0,1)*(dists.clamp(min=self.res)**2)) # Z,N,K,Vx,Vy,Vz,A,S
+		dist_term = dist_vectors / (dists.masked_fill(dists==0,1)*(dists.clamp(min=self.res)**2)) # Z,N,Vx,Vy,Vz,A,S
 
 		# get partial charges, zero out masked atoms
-		partial_charges = torch.gather(amber_partial_charges.view(1,1,AA,A).expand(Z,N,AA,A), 2, L.view(Z,N,1,1).expand(Z,N,1,A)) * atom_mask.unsqueeze(2) # Z, N, 1, A
+		partial_charges = torch.gather(self.amber_partial_charges.view(1,1,AA,A).expand(Z,N,AA,A), 2, L.view(Z,N,1,1).expand(Z,N,1,A)).squeeze(2) * atom_mask # Z, N, A
 
-		# get the partial charges of the neighbors, zero out invalid neighbors
-		partial_charges_nbrs = torch.gather(partial_charges.expand(Z, N, K, A), 1, nbrs.unsqueeze(3).expand(Z, N, K, A)) * nbr_mask.unsqueeze(3) # Z,N,K,A
-
-		# now compute the final field, sum over neighbors and atoms. 
-		# not an actual field, i tuned it so it is approx continuous
-		# using the actual coulomb constant made it less continuous, i want something that is image like, see visualization/compute_voxels.ipynb to see what im talking about
-		fields = torch.sum(partial_charges_nbrs.view(Z, N, K, 1, 1, 1, A, 1) * dist_term.view(Z, N, K, Vx, Vy, Vz, A, S), dim=(2,6)) # Z,N,Vx,Vy,Vz,S
+		# now compute the final field, sum over atoms. 
+		# no coulomb constant, since scaling to unit vector anyways
+		fields = torch.sum(partial_charges.view(Z, N, 1, 1, 1, A, 1) * dist_term.view(Z, N, Vx, Vy, Vz, A, S), dim=5) # Z,N,Vx,Vy,Vz,S
 
 		# decidied to norm to unit vectors, thus the models job is to nudge them towards the true direction
 		# also works well with latent diffusion, as the compression makes sense, since there is redundancy due to continuous nature
@@ -167,5 +127,3 @@ class PreProcesser(nn.Module):
 		fields = fields.permute(0,1,5,2,3,4)
 
 		return fields
-
-		

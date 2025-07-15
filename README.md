@@ -9,9 +9,8 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 1. first step is to create the virtual $C_\beta$ atom from empirical constants. 
 2. next step is to define a local coordinate frame for each residue, the y-axis is the vector pointing from $C_\alpha$ to the $C_\beta$, the x-axis is the vector that is pointing from N to C projected onto the plane normal to the y-axis vector, and the z-axis is the cross product of the two.  use virtual $C_\beta$ for frame computation, but true position for electrostatic field later (no $C_\beta$ for glycine).
 3. using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z$ (e.g. 16 x 16 x 16, , giving $16\times16\times16\times = 512$ cells, in this case each cell is $0.75^3$ $\AA^3$, making the whole voxel 1728 $\AA^3$)
-4. now we compute the topK nearest neighbors of each residue using $C_\alpha$ coordinates. 
-5. for each atom we assign a partial charge using the AMBER partial charges from ff19SB. using the electric vector field formula, for each residue, we sum the electric effects of all atoms of all nearest neighbors relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point. However, in order to avoid the model overfitting to "empty" regions where the amino acid is not present and magnitude is near zero, we normalize the vectors to unit length. This creates a vector field, indicating the direction of the electric field lines (see below for an example visualization).
-6. here is where it gets interesting.
+4. for each atom we assign a partial charge using the AMBER partial charges from ff19SB. using the electric vector field formula, for each residue, we sum the electric effects of all atoms of the residue relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the electric field at that point. However, in order to avoid the model overfitting to "empty" regions where the amino acid is not present and magnitude is near zero, we normalize the vectors to unit length. This creates a vector field, indicating the direction of the electric field lines (see below for an example visualization).
+5. here is where it gets interesting.
 
     - Variational Auto Encoder (VAE)
         
@@ -44,11 +43,11 @@ the input is the N, $C_\alpha$, and C atoms for inference, but for training need
 Here is an example of what the model is denoising. Note that these plots are produced using the data space, not the latent space, and no denoising has been done, it is just to give an intuitive idea:
 
 <p align="center">
-  <img src="docs/img/gauss_noise_unit.png" alt="Arch" width="800"/>
+  <img src="docs/img/noise.png" alt="Arch" width="800"/>
 </p>
 
 <p align="center">
-  <img src="docs/img/true_4l3o_A_resi2_R_unit.png" alt="Arch" width="800"/>
+  <img src="docs/img/true.png" alt="Arch" width="800"/>
 </p>
 
 

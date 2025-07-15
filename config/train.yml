@@ -11,7 +11,7 @@ config: "config/train.yml"
 # ------------------------------------------------------------------------------
 
 debug_grad: False
-port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+port: 29501 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------
 
@@ -36,7 +36,7 @@ training_parameters:
     temperature: !!float 1e-6
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
-    tolerance: 30 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
+    tolerance: 15 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
   adam:
     beta1: 0.90  # decay rate of momentum term
     beta2: 0.98  # decay rate of variance term
@@ -47,11 +47,10 @@ training_parameters:
     noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
     homo_thresh: 0.70
   loss:
-    # i think grad accum is v important for diffusion, will see if this helps
     accumulation_steps: 1
     grad_clip_norm: 0.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
     label_smoothing: 0.00
-    beta: 1e-3
+    beta: !!float 1e-3
   lr:
     lr_type: "attn"
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
@@ -61,21 +60,21 @@ training_parameters:
 
 # dataset configs
 data:
-  data_path: "/scratch/hjc2538/projects/proteusAI/data/multi_chain/processed"  # path to data for multi-chain model (dataset from Dapauras et. al.)
+  data_path: "/work/hcardenas1/projects/ProteinDiff/data/processed"  # path to data for multi-chain model (dataset from Dapauras et. al.)
   num_train: -1  # number of training samples to use; -1 means all available
   num_val: -1  # number of validation samples to use; -1 means all available
   num_test: -1  # number of test samples to use; -1 means all available
   max_batch_size: 256  # maximum samples per batch
   min_seq_size: 16 # minimum sequence length, shorter is excluded
-  max_seq_size: 16384 # max sequence lengths, longer samples not included
-  batch_tokens: 16384 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
+  max_seq_size: 10000 # max sequence lengths, longer samples not included
+  batch_tokens: 10000 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
 
 # ------------------------------------------------------------------------------
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/ProteinDiff/models/test"
+  out_path: "/work/hcardenas1/projects/ProteinDiff/models/vae"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from ProteusDiff import ProteusDiff 
+from ProteinDiff import ProteinDiff 
 from utils.train_utils.io_utils import Output
 from utils.train_utils.data_utils import DataHolder
 from utils.train_utils.training_run_utils import Epoch, Batch
@@ -94,12 +94,13 @@ class TrainingRun():
 								args.data.min_seq_size, args.data.max_seq_size, 
 								args.data.max_resolution,
 								args.training_parameters.regularization.homo_thresh, 
-								self.rank, self.world_size, self.training_parameters.rng
+								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae is trained on individual side chains, no need to make copies 
+								rank=self.rank, world_size=self.world_size, rng=self.training_parameters.rng
 							)
 		
 		self.losses = TrainingRunLosses(	args.training_parameters.train_type,
-											args.training_parameters.losses.label_smoothing, 
-											args.training_parameters.losses.beta,
+											args.training_parameters.loss.label_smoothing, 
+											args.training_parameters.loss.beta,
 										)
 
 		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints, rank=self.rank, world_size=self.world_size)
@@ -127,10 +128,7 @@ class TrainingRun():
 		
 		self.log("loading model...")
 		
-		self.model = proteusAI(	d_model=self.hyper_parameters.d_model, top_k=self.hyper_parameters.top_k,,
-								min_rbf=self.hyper_parameters.edge_embedding.min_rbf, max_rbf=self.hyper_parameters.edge_embedding.max_rbf, num_rbfs=self.hyper_parameters.edge_embedding.num_rbfs,
-								enc_layers=self.hyper_parameters.encoder.layers, dec_layers=self.hyper_parameters.decoder.layers, dropout=self.training_parameters.regularization.dropout)
-	
+		self.model = ProteinDiff()
 		# parallelize the model
 		self.model.to(self.gpu)
 		self.model = DDP(self.model, device_ids=[self.rank])
@@ -151,7 +149,7 @@ class TrainingRun():
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.module.parameters())
 
 		# print gradients at each step if in debugging mode
-		if self.debug.debug_grad: # havent tested with DDP, but might interfere with DDP hooks for grad reduce, will check later, prob not until i need to debug grads lol
+		if self.debug: # havent tested with DDP, but might interfere with DDP hooks for grad reduce, will check later, prob not until i need to debug grads lol
 			def print_grad(name):
 				def hook(grad):
 					print(f"Gradient at {name}: mean={grad.mean().item():.6f}, std={grad.std().item():.6f}, max={grad.abs().max().item():.6f}")
@@ -227,7 +225,7 @@ class TrainingRun():
 
 	def training_converged(self, epoch_idx):
 
-		criteria = self.losses.val.cel
+		criteria = self.losses.val.losses[list(self.losses.val.losses.keys())[0]]
 
 		choose_best = min # choose best
 		best = float("inf")
@@ -286,8 +284,8 @@ class TrainingRun():
 		# save the model
 		self.output.save_checkpoint(self.model, self.optim, self.scheduler, appended_str="final")
 
-        # done
-        self.log("fin", fancy=True)
+		# done
+		self.log("fin", fancy=True)
 
 	def validation(self):
 		
@@ -300,13 +298,13 @@ class TrainingRun():
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
 
-        # logging
-        self.log("running validation...")
+		# logging
+		self.log("running validation...")
 
-        # progress bar
-        if self.rank == 0:
-            val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
-                
+		# progress bar
+		if self.rank == 0:
+			val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
+				
 		# turn off gradient calculation
 		with torch.no_grad():
 
@@ -343,9 +341,9 @@ class TrainingRun():
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
 
-        # progress bar
-        if self.rank == 0:
-            test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
+		# progress bar
+		if self.rank == 0:
+			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 
 		# turn off gradient calculation
 		with torch.no_grad():

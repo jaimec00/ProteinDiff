@@ -2,7 +2,6 @@
 
 import torch
 from tqdm import tqdm
-from utils.train_utils.model_outputs import ModelOutputs
 from data.constants import aa_2_lbl
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -13,12 +12,13 @@ class Epoch():
 		self.training_run_parent = training_run
 		self.epoch = epoch
 		self.epochs = training_run.training_parameters.epochs
-	
+		self.train_type = self.training_run_parent.training_parameters.train_type
+
 	def training(self):
-		if self.training_run_parent.train_type=="vae":
+		if self.train_type=="vae":
 			self.training_run_parent.model.module.vae.train()
 			self.training_run_parent.model.module.classifier.train()
-		elif self.training_run_parent.train_type=="diffusion":
+		elif self.train_type=="diffusion":
 			self.training_run_parent.model.module.diffusion.train()
 
 	def epoch_loop(self):
@@ -85,7 +85,7 @@ class Batch():
 		self.epoch_parent = epoch
 		self.inference = inference
 		self.temp = temp
-		self.train_type = epoch.training_run_parent.training_parameters.train_type
+		self.train_type = epoch.train_type
 		self.world_size = epoch.training_run_parent.world_size
 		self.rank = epoch.training_run_parent.rank
 
@@ -120,14 +120,14 @@ class Batch():
 		self.move_to(self.epoch_parent.training_run_parent.gpu)
 
 		# utils
-		model = epoch.training_run_parent.model.module			
+		model = self.epoch_parent.training_run_parent.model.module			
 		loss_function = self.epoch_parent.training_run_parent.losses.loss_function
 
 		# for vae training
 		if self.train_type=="vae":
 			
 			# get the fields
-			_, fields, _, _ = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
+			_, fields = model.prep(self.coords, self.labels, self.atom_mask)
 
 			# get the encoder latents and decoder field predictions 
 			latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
@@ -144,12 +144,11 @@ class Batch():
 			# inference only applicable after train diffusion
 			if self.inference:
 
-				# get coords and neighbors
+				# get coords
 				coords_bb = model.prep.get_backbone(self.coords)
-				nbrs, nbr_mask = model.prep.get_neighbors(coords_bb, self.valid_mask)
 
 				# generate a latent from white noise
-				generated_latent = model.diffusion.generate(coords_bb, nbrs, nbr_mask)
+				generated_latent = model.diffusion.generate(coords_bb)
 
 				# predict the fields from generated latent
 				fields_pred = model.vae.dec(generated_latent)
@@ -163,7 +162,7 @@ class Batch():
 			else:
 
 				# run the prep to get the fields
-				coords_bb, fields, nbrs, nbr_mask = model.prep(self.coords, self.labels, self.atom_mask, self.valid_mask)
+				coords_bb, fields = model.prep(self.coords, self.labels, self.atom_mask)
 
 				# sample a latent
 				latent, latent_mu, latent_logvar = model.vae.enc(fields)
@@ -173,7 +172,7 @@ class Batch():
 				latent_noised, noise = model.diffusion.noise(latent, t)
 
 				# predict noise
-				noise_pred = model.diffusion(latent_noised, t, nbrs, nbr_mask)
+				noise_pred = model.diffusion(coords_bb, latent_noised, t)
 
 				# compute loss
 				losses = loss_function.diff(noise_pred, noise, self.loss_mask)

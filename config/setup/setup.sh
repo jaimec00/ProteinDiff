@@ -2,7 +2,7 @@
 
 # get the config dir
 CONFIG_DIR=$(cd $(dirname ${BASH_SOURCE}) && pwd)
-PROTEINDIFF_DIR=$(dirname $CONFIG_DIR)
+PROTEINDIFF_DIR=$(dirname $(dirname $CONFIG_DIR))
 
 # check if conda is available, if not then setup conda
 source "$CONFIG_DIR/setup_conda.sh"
@@ -16,18 +16,15 @@ conda activate ProteinDiff_env
 
 # check where the env is located
 ACT_SCRIPT="$CONDA_PREFIX/etc/conda/activate.d/conda_activation_script.sh"
-cat << EOF > $ACT_SCRIPT
-
+cat << EOF > "$ACT_SCRIPT"
 # setup env for proteus ai
-export PYTHONPATH="\$PYTHONPATH;$PROTEINDIFF_DIR"
-
+export PYTHONPATH="$PROTEINDIFF_DIR"
 # cuda config
 export CUDA_HOME=\$CONDA_PREFIX
 export TORCH_NVCC_EXECUTABLE=\$CUDA_HOME/bin/nvcc
 export PATH=\$CUDA_HOME/bin:\$PATH
 export LD_LIBRARY_PATH=\$CUDA_HOME/lib64:\$LD_LIBRARY_PATH
-
-EOF 
+EOF
 
 # deactivate and activate so the activation script works
 conda deactivate

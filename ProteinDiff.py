@@ -16,7 +16,7 @@ class ProteinDiff(nn.Module):
         training run handles how to use them efficiently. forward method is just for inference
         '''
 
-        self.prep = PreProcesser(top_k=top_k, voxel_dims=voxel_dims, cell_dim=cell_dim)
+        self.prep = PreProcesser(voxel_dims=voxel_dims, cell_dim=cell_dim)
         self.vae = VAE()
         self.diffusion = Diffusion()
         self.classifier = Classifier()

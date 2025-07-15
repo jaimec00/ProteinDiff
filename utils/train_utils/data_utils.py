@@ -22,6 +22,7 @@ import random
 import psutil
 import math
 import os
+import hashlib 
 
 from data.constants import alphabet, aa_2_lbl
 
@@ -51,10 +52,27 @@ class EpochBioUnits():
 
 		# do it with a dict using the biounit hash
 		biounit.sample_asmb() # sample an assembly
-		self.biounit_hashes[(biounit, chain)] = [biounit.current_asmb, chain]
+		self.biounit_hashes[self.hash_biounit(biounit, chain)] = [biounit.current_asmb, chain]
+
+	def hash_biounit(self, biounit, chain):
+
+		# hash the biounit using the coords and the chain letter so that get the same
+		# data across all gpus and can split accordingly
+		biounit_bytes = np.ascontiguousarray(biounit.coords.numpy()).tobytes()
+		chain_bytes = chain.encode("utf-8")
+
+		hasher = hashlib.md5()
+
+		hasher.update(biounit_bytes)
+		hasher.update(chain_bytes)
+
+		digest_bytes = hasher.digest()
+
+		return int.from_bytes(digest_bytes, byteorder="big")
 
 	def clear_biounits(self):
 		self.biounits = []
+		self.biounit_hashes = {}
 		self.chains = []
 		self.batches = []
 
@@ -157,30 +175,37 @@ class BioUnitCache():
 				return None
 
 class BioUnit():
-	def __init__(self, biounit_dict, max_seq_size=float("inf")):
+	def __init__(self, biounit_dict, max_seq_size=float("inf"), asymmetric_units_only=False):
 
-		self.coords = biounit_dict["coords"]
+		coords = biounit_dict["coords"]
+		self.coords = coords.masked_fill(coords.isnan(), 0.0)
 		self.labels = biounit_dict["labels"] 
 		self.atom_mask = biounit_dict["atom_mask"]
 		self.chain_idxs = biounit_dict["chain_idxs"] # dict of chain [start, end)
 		self.seq_sims = biounit_dict["seq_sims"] # dict of dicts, indicating seq sim of each chain to all others, outer dicts contains each chain as values, inner dict is value of outer, with keys of inner dict being all other chains, and values being the seq sims
-		self.asmb_xforms = [xform for xform in biounit_dict["asmb_xforms"] if xform.size(0)*self.labels.size(0) <= max_seq_size] # transforms to get biological assembly. list of tensors. first dim of each tensor is the number of copies
 		self.size = self.labels.size(0)
+		
+		if asymmetric_units_only:
+			self.asmb_xforms = [torch.eye(4).unsqueeze(0)]
+		else:
+			self.asmb_xforms = [xform for xform in biounit_dict["asmb_xforms"] if xform.size(0)*self.size <= max_seq_size] # transforms to get biological assembly. list of tensors. first dim of each tensor is the number of copies
+
 
 	def sample_asmb(self):
 		xform = random.sample(self.asmb_xforms, 1)[0] # N x 4 x 4
 		num_copies = xform.size(0)
 		R = xform[:, :3, :3] # num_copies x 3 x 3
 		T = xform[:, :3, 3] # num_copies x 3
+		N, A, S = self.coords.shape
 
-		coords = torch.einsum("bij,raj->brai", R, coords) + T.view(num_copies, 1,1,3)
+		coords = (torch.einsum("bij,raj->brai", R, self.coords) + T.view(num_copies, 1,1,3)).reshape(N*num_copies, A, S)
 
 		# adjust sizes based on the number of copies made
 		chain_idxs = {chain: [[idxs[0] + self.size*i, idxs[1] + self.size*i] for i in range(num_copies)] for chain, idxs in self.chain_idxs.items()}
 		labels = self.labels.repeat(num_copies)
-		atom_mask = self.atom_mask.repeat(num_copies)
+		atom_mask = self.atom_mask.repeat([num_copies, 1])
 
-		self.current_asmb = BioUnit({"coords": coords, "labels": labels, "mask": atom_mask, "chain_idxs": chain_idxs, "seq_sims": self.seq_sims, "asmb_xforms": [xform]})
+		self.current_asmb = BioUnit({"coords": coords, "labels": labels, "atom_mask": atom_mask, "chain_idxs": chain_idxs, "seq_sims": self.seq_sims, "asmb_xforms": [xform]})
 
 	def __len__(self):
 		return self.size
@@ -204,7 +229,7 @@ class DataBatch():
 		self.chain_idxs = [[chain_copy for chain in epoch_biounits[idx].chain_idxs.values() for chain_copy in chain] for idx, _ in batch] # no padding for chain idxs
 
 		# compute/pad masks
-		self.pad_mask = torch.tensor([size for _, size in batch], device=device).view(-1,1) > torch.arange(seq_size).view(1,-1)
+		self.pad_mask = torch.tensor([size for _, size in batch], device=device).view(-1,1) < torch.arange(seq_size).view(1,-1)
 		self.atom_mask = self.pad_and_batch(atom_masks, pad_val="zero", max_size=seq_size)
 		self.chain_mask = self.pad_and_batch(chain_masks, pad_val="zero", max_size=seq_size).to(torch.bool)
 		self.seq_mask = self.labels!=-1
@@ -223,7 +248,7 @@ class DataBatch():
 		self_idxs = [epoch_biounits[idx].chain_idxs[epoch_biounits.chains[idx]]]
 		
 		# loop through homo chains and self chains, since single chain biounits might not have seq sims
-		for chain_copies in homo_idxs + self_chains:
+		for chain_copies in homo_idxs + self_idxs:
 			for start, stop in chain_copies:
 				chain_mask[start:stop] = True
 
@@ -274,6 +299,7 @@ class DataHolder():
 						min_seq_size=16, max_seq_size=16384,
 						max_resolution=3.5,
 						homo_thresh=0.70,
+						asymmetric_units_only=False,
 						rank=0, world_size=1, rng=0
 					):
 
@@ -290,6 +316,10 @@ class DataHolder():
 
 		# seq sim threshold for homo chain detection
 		self.homo_thresh = homo_thresh
+
+		# vae is only trained on individual side chain voxels,
+		# adding copies to construct bilogical units just biases training towards samples with multiple copies and requires more computation
+		self.asymmetric_units_only = asymmetric_units_only 
 
 		# for distributed training
 		self.rank = rank
@@ -344,14 +374,14 @@ class DataHolder():
 		loads the Data Objects, allowing for the objects to be retrieved afterwards
 		'''
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size,  self.homo_thresh, self.rank, self.world_size, self.rng)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size,  self.homo_thresh, self.asymmetric_units_only, self.rank, self.world_size, self.rng)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.homo_thresh, self.rank, self.world_size, self.rng)
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.homo_thresh, self.asymmetric_units_only, self.rank, self.world_size, self.rng)
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.homo_thresh, self.rank, self.world_size, self.rng)
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.homo_thresh, self.asymmetric_units_only, self.rank, self.world_size, self.rng)
 
 class Data():
-	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, homo_thresh=0.70, rank=0, world_size=1, rng=0, device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, homo_thresh=0.70, asymmetric_units_only=False, rank=0, world_size=1, rng=0, device="cpu"):
 
 		# path to pdbs
 		self.pdb_path = data_path / Path("pdb")
@@ -362,6 +392,7 @@ class Data():
 		self.max_seq_size = max_seq_size
 		self.min_seq_size = min_seq_size
 		self.homo_thresh = homo_thresh # if tm_score is above this, then corresponding chain sequences are masked
+		self.asymmetric_units_only = asymmetric_units_only
 
 		self.rank = rank
 		self.world_size = world_size
@@ -431,7 +462,7 @@ class Data():
 
 		biounit_path = self.pdb_path / Path(f"{biounit_id.split('_')[0][1:3]}/{biounit_id}.pt") 
 		biounit_raw = torch.load(biounit_path, weights_only=True)
-		biounit = BioUnit(biounit_raw, self.max_seq_size) # the seq size of the biounits in list.csv is the minimum of each biounit, need to filter out assemblys create by applying xforms that are too big
+		biounit = BioUnit(biounit_raw, self.max_seq_size, self.asymmetric_units_only) # the seq size of the biounits in list.csv is the minimum of each biounit, need to filter out assemblys create by applying xforms that are too big
 		self.biounit_cache.add_biounit(biounit, biounit_id)
 
 		return biounit
@@ -502,8 +533,8 @@ class DataCleaner():
 			pdb_biounits = {}
 
 			# parallel execution		
-			pbar = tqdm(total=len(all_pdbs), desc="biounit computatino progress", unit="step")
-			with ThreadPoolExecutor(max_workers=8) as executor:
+			pbar = tqdm(total=len(all_pdbs), desc="biounit computation progress", unit="step")
+			with ThreadPoolExecutor(max_workers=32) as executor:
 				
 				# submit tasks
 				futures = {executor.submit(self.compute_biounits, pdb): pdb for _, pdb in all_pdbs.items()}
@@ -629,7 +660,7 @@ class DataCleaner():
 			biounit_mask.append(mask)
 
 		if biounit_coords==[] or biounit_labels==[]:
-			return None, None, None
+			return None, None, None, None
 
 		biounit_coords = torch.cat(biounit_coords, dim=0)
 		biounit_labels = torch.cat(biounit_labels, dim=0)

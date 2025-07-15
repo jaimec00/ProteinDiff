@@ -69,7 +69,7 @@ class Output():
 			max batch size (samples): {data.max_batch_size:,}
 			min sequence length (tokens): {data.min_seq_size:,}
 			max sequence length (tokens): {data.max_seq_size:,}
-			effective batch size (tokens): {training_parameters.loss.accumulation_steps if training_parameters.loss.token_based_step else data.batch_tokens * training_parameters.loss.accumulation_steps}
+			effective batch size (tokens): {data.batch_tokens * training_parameters.loss.accumulation_steps}
 
 		training-parameters:
 			epochs: {training_parameters.epochs}
@@ -89,10 +89,12 @@ class Output():
 				dropout: {training_parameters.regularization.dropout}
 				noise_coords_std: {training_parameters.regularization.noise_coords_std}
 				homo_thresh: {training_parameters.regularization.homo_thresh}
-				label_smoothing: {training_parameters.regularization.label_smoothing}
 			loss:
 				accumulation_steps: {training_parameters.loss.accumulation_steps} batches
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
+				label_smoothing: {training_parameters.loss.label_smoothing}
+				beta: {training_parameters.loss.beta}
+
 			lr:
 				lr_type: {training_parameters.lr.lr_type}
 				lr_step: {training_parameters.lr.lr_step}
@@ -142,6 +144,7 @@ class Output():
 		losses_dict = losses.tmp.get_avg()
 		for loss_type, loss in losses_dict.items():
 			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
+		self.log.info("")
 		
 		if mode == "train":
 			losses.train.add_losses(losses_dict)
@@ -189,8 +192,8 @@ class Output():
 
 		checkpoint = {	"model": {	"vae": model.module.vae.state_dict(), 
 									"diffusion": model.module.diffusion.state_dict(), 
-									"classifier": model.module.classifier.state_dict(), 
-						}
+									"classifier": model.module.classifier.state_dict(),
+						},
 						"adam": (None if adam is None else adam.state_dict()), 
 						"scheduler": (None if scheduler is None else scheduler.state_dict())
 					}

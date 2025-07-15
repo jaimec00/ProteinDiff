@@ -36,4 +36,3 @@ dependencies:
   - plotly
   - python-box
 
-prefix: /scratch/hjc2538/conda/envs/ProteinDiff_env
