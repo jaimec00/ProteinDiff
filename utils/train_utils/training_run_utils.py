@@ -78,7 +78,7 @@ class Batch():
 		# define masks
 		self.atom_mask = data_batch.atom_mask
 		self.valid_mask = ~data_batch.pad_mask & data_batch.coords_mask & data_batch.seq_mask
-		self.loss_mask = self.valid_mask & data_batch.chain_mask & data_batch.canonical_seq_mask
+		self.loss_mask = self.valid_mask  & data_batch.canonical_seq_mask & data_batch.chain_mask
 
 		# other stuff
 		self.b_idx = b_idx
@@ -148,7 +148,7 @@ class Batch():
 				coords_bb = model.prep.get_backbone(self.coords)
 
 				# generate a latent from white noise
-				generated_latent = model.diffusion.generate(coords_bb)
+				generated_latent = model.diffusion.generate(coords_bb, self.valid_mask)
 
 				# predict the fields from generated latent
 				fields_pred = model.vae.dec(generated_latent)

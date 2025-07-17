@@ -43,12 +43,12 @@ training_parameters:
     epsilon: !!float 10e-9  # for numerical stability in param updates (!!float lets PyYAML know this is a float, not str)
     weight_decay: 0.00 # weight decay, set to 0 for no weightdecay, ie regular adam
   regularization:
-    dropout: 0.10  # percentage of dropout
+    dropout: 0.00  # percentage of dropout
     noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
     homo_thresh: 0.70
   loss:
     accumulation_steps: 1
-    grad_clip_norm: 0.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
+    grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
     label_smoothing: 0.00
     beta: !!float 5e-4
   lr:
@@ -74,7 +74,7 @@ data:
 
 # Output
 output:
-  out_path: "/work/hcardenas1/projects/ProteinDiff/models/diffusion"
+  out_path: "/work/hcardenas1/projects/ProteinDiff/models/diffusion_nonode_update"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

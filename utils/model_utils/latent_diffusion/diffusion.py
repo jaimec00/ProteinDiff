@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from utils.model_utils.latent_diffusion.diffusion_utils import StructureEncoder, LatentEncoder, GraphUpdater, DiT
+from utils.model_utils.latent_diffusion.diffusion_utils import StructureEncoder, LatentEncoder, GraphUpdater, DiT, UNet
 
 class Diffusion(nn.Module):
 	def __init__(self, d_model=128, d_latent=4, struct_enc_layers=3, transformer_layers=3, heads=4, t_max=1000):
@@ -9,10 +9,12 @@ class Diffusion(nn.Module):
 		self.d_latent = d_latent
 		
 		self.structure_encoder = StructureEncoder(d_model, struct_enc_layers)
-		self.latent_encoder = LatentEncoder(d_latent, d_model)
 
-		self.graph_updaters = nn.ModuleList([GraphUpdater(d_model) for layer in range(transformer_layers)])
-		self.transformers = nn.ModuleList([DiT(d_model, heads) for layer in range(transformer_layers)])
+		# self.latent_encoder = LatentEncoder(d_latent, d_model)
+		# self.graph_updaters = nn.ModuleList([GraphUpdater(d_model) for layer in range(transformer_layers)])
+		# self.transformers = nn.ModuleList([DiT(d_model, heads) for layer in range(transformer_layers)])
+
+		self.denoiser = UNet(d_latent, d_model) 
 
 		self.beta_scheduler = BetaScheduler(t_max)
 		self.register_buffer("t_wavenumbers", 10000**-(2*torch.arange(d_model//2)/d_model))
@@ -27,17 +29,20 @@ class Diffusion(nn.Module):
 		nodes, edges, nbrs, nbr_mask = self.structure_encoder(coords_bb, valid_mask)
 
 		# increase latent feature dim, also reshapes so feature dim at the end
-		latent = self.latent_encoder(latent)
+		# latent = self.latent_encoder(latent)
 
 		# predict noise
-		noise_pred = self.denoise(latent, t, nodes, edges, nbrs, nbr_mask)
+		# noise_pred = self.denoise(latent, t, nodes, edges, nbrs, nbr_mask)
+
+		# testing unet
+		noise_pred = self.denoiser(latent, t, nodes, edges, nbrs, nbr_mask)
 
 		return noise_pred
 
 	def prep_inputs(self, latent, t):
 		
 		Z, N, d_latent, Vx, Vy, Vz = latent.shape
-		latent = latent.view(Z*N, d_latent, Vx, Vy, Vz)
+		latent = latent.reshape(Z*N, d_latent, Vx, Vy, Vz)
 
 		# featurize timestep embeddings and reshape
 		t = self.featurize_t(t)
@@ -56,10 +61,11 @@ class Diffusion(nn.Module):
 		Z, N, _ = nodes.shape
 		_, _, Vx, Vy, Vz = latent.shape
 
+		
 		for transformer, graph_updater in zip(self.transformers, self.graph_updaters):
 
 			# condition nodes on latent state and pass messages
-			nodes, edges = graph_updater(latent, nodes, edges, nbrs, nbr_mask)
+			nodes, edges = graph_updater(latent, t, nodes, edges, nbrs, nbr_mask)
 
 			# run the transformer layer
 			latent = transformer(latent, nodes, t)
@@ -87,10 +93,10 @@ class Diffusion(nn.Module):
 			latent_t, et = self.prep_inputs(latent, t)
 
 			# increase latent feature dim
-			latent_t = self.latent_encoder(latent_t)
+			# latent_t = self.latent_encoder(latent_t)
 
 			# predict noise
-			noise_pred = self.denoise(latent_t, et, nodes, edges, nbrs, nbr_mask)
+			noise_pred = self.denoiser(latent_t, et, nodes, edges, nbrs, nbr_mask)
 
 			# remove noise
 			latent = self.nudge(latent, noise_pred, t)

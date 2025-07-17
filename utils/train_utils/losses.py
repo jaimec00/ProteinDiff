@@ -26,8 +26,8 @@ class TrainingRunLosses():
 
 		# inference mode only applicable after train vae and diffusion
 		if train_type=="vae":
-			self.clear_tmp_losses() # 
-		elif train_type=="diffusion":
+			self.clear_tmp_losses() # vae evaluation is the same as training
+		elif train_type=="diffusion": # run full inference
 			self.tmp.losses = {	"Cross Entropy Loss": [],
 								"Top 1 Accuracy": [],
 								"Top 3 Accuracy": [],

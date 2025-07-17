@@ -146,21 +146,21 @@ class Output():
 			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
 		self.log.info("")
 		
-		if mode == "train":
+		if mode == "Train":
 			losses.train.add_losses(losses_dict)
-		elif mode == "validation":	
+		elif mode == "Validation":	
 			losses.val.add_losses(losses_dict)
 		else: # testing
 			losses.test.extend_losses(losses.tmp)
 
 	def log_epoch_losses(self, losses):
-		self.log_losses(losses, "train")
+		self.log_losses(losses, "Train")
 
 	def log_val_losses(self, losses):
-		self.log_losses(losses, "validation")
+		self.log_losses(losses, "Validation")
 
 	def log_test_losses(self, losses):
-		self.log_losses(losses, "test")
+		self.log_losses(losses, "Test")
 
 	def plot_training(self, losses):
 

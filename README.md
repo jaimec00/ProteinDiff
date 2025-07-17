@@ -42,7 +42,7 @@ The input is the N, $C_\alpha$, and C atoms for inference, but for training need
             
             - Next step is to update the nodes produced by the structure encoder based on the state of the processed latent. We downsample the latent 2X using convolutions w/ SiLU activation, until get $1\times1\times1\times d_\text{model}$ tensor. project to $2\times d_\text{model}$, chunk into $\gamma$ and $\beta$, do $V = \gamma \times V + \beta$, then do PMPNN style message passing, i.e. $V_i$ += $\text{sum}_j[\text{MLP}[V_i, V_j, E_\text{ij}]]$, where the nodes carry backbone info AND info about the abstracted latent. 
             
-            - Once the nodes have been updated, use adaLN with conditioning coming from MLP[t, V] on the $4\times4\times4\times d_\text{model}$ tensor, perform self attention. 
+            - Once the nodes have been updated, use adaLN with conditioning coming from MLP[t, V] on the $4\times4\times4\times d_\text{model}$ tensor, perform self attention on the flattened voxel cells (nor cross talk between residues other than from the node conditioning). 
             
             - The previous two steps are repeated for every DiT layer. This way, the local voxel latents are conditioned on the global backbone configuration, and the global nodes are conditioned on the state of their neighbor's voxel latents.
             

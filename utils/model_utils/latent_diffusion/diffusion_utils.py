@@ -186,11 +186,11 @@ class GraphUpdater(nn.Module):
 												nn.Conv3d(d_model, d_model, 1, stride=1, padding="same", bias=True)
 									)
 
-		self.latent_conditioning = FiLM(d_model=d_model, d_hidden=d_model, hidden_layers=1, dropout=0.0)
+		self.latent_conditioning = FiLM(d_model=d_model, d_condition=d_model)
 
 		self.mpnn = MPNN(d_model=d_model, update_edges=True)
 
-	def forward(self, latent, nodes, edges, nbrs, nbr_mask):
+	def forward(self, latent, t, nodes, edges, nbrs, nbr_mask):
 		
 		# prep
 		ZN, Cin, Vx, Vy, Vz = latent.shape
@@ -198,7 +198,7 @@ class GraphUpdater(nn.Module):
 
 		# reshape
 		latent = self.collapse_latent(latent)
-		latent = latent.view(Z, N, Cout)
+		latent = latent.view(Z, N, Cout) + t.reshape(Z,N,Cout)
 
 		# condition nodes on latent
 		nodes = self.latent_conditioning(nodes, latent)
@@ -208,14 +208,6 @@ class GraphUpdater(nn.Module):
 
 		return nodes, edges
 
-class FiLM(nn.Module):
-	def __init__(self, d_model=128, d_hidden=128, hidden_layers=1, dropout=0.0):
-		super(FiLM, self).__init__()
-		self.gamma_beta = MLP(d_in=d_model, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, act="silu", dropout=dropout)
-	def forward(self, x, y): # assumes they are the same shape
-		gamma_beta = self.gamma_beta(y)
-		gamma, beta = torch.split(gamma_beta, dim=-1, split_size_or_sections=gamma_beta.shape[-1] // 2)
-		return gamma*x + beta
 
 class DiT(nn.Module):
 	def __init__(self, d_model=128, heads=4):
@@ -224,7 +216,7 @@ class DiT(nn.Module):
 		self.attn = SelfAttention(d_model=d_model, heads=heads)
 		self.attn_norm = adaLN(d_model=d_model, d_in=d_model, d_hidden=d_model, hidden_layers=1, dropout=0.0)
 
-		self.ffn = MLP(d_in=d_model, d_out=d_model, d_hidden=d_model, hidden_layers=0, act="silu", dropout=0.0)
+		self.ffn = MLP(d_in=d_model, d_out=d_model, d_hidden=4*d_model, hidden_layers=0, act="silu", dropout=0.0)
 		self.ffn_norm = adaLN(d_model=d_model, d_in=d_model, d_hidden=d_model, hidden_layers=1, dropout=0.0)
 
 		self.norm = StaticLayerNorm(d_model)
@@ -248,7 +240,7 @@ class DiT(nn.Module):
 
 		# ffn
 		latent2 = gamma2*self.norm(latent) + beta2
-		latent = latent + alpha2*latent2
+		latent = latent + alpha2*self.ffn(latent2)
 
 		# reshape
 		latent = latent.permute(0,2,1).reshape(ZN, d_model, Vx, Vy, Vz)
@@ -323,3 +315,192 @@ class StaticLayerNorm(nn.Module):
 		std = centered.std(dim=-1, keepdim=True)
 		std = std.masked_fill(std==0, 1)
 		return centered / std
+
+class UNet(nn.Module):
+	'''
+	downsamples the latent from 4x4x4x4 to 128x1x1x1, then upsamples back to 4x4x4x4
+	each resolution is conditioned on catted tensor of timestep and node state from structure encoder
+	at bottleneck, the node is conditioned on catted tensor of bottleneck and timestep, and then does
+	multiple layers of message passing with other nodes. allows each latent to get an updated conditioning
+	vector (the node) based on its neighbor's latent states and the timestep
+	this updated node is then used as conditioining with the timestep for the upsampling stage
+	'''
+	def __init__(self, d_latent=4, d_model=128, mpnn_layers=3, resnet_layers=2):
+		super().__init__()
+
+		# increase channels, same spatial res
+		self.conv_feature = nn.Conv3d(d_latent, d_model//8, 2, stride=1, padding="same", bias=True) #16,4,4,4
+		self.condition_feature = ResNet(d_model=d_model//8, d_condition=2*d_model, kernel_size=2, layers=resnet_layers) #16,4,4,4
+
+		# preprocess w/ resnets and downsample to 2x2x2, double channels
+		self.conv_down1 = nn.Sequential(	nn.SiLU(),
+											nn.GroupNorm(d_model//128, d_model//8),
+											nn.Conv3d(d_model//8, d_model//4, 2, stride=2, padding=0, bias=True)
+										) 
+		self.condition_down1 = ResNet(d_model=d_model//4, d_condition=2*d_model, kernel_size=2, layers=resnet_layers)
+		
+		# preprocess w/ resnets and downsample to 1x1x1, double channels
+		self.conv_down2 = nn.Sequential(	nn.SiLU(),
+											nn.GroupNorm(d_model//64, d_model//4),
+											nn.Conv3d(d_model//4, d_model//2, 2, stride=2, padding=0, bias=True)									
+										) 
+		self.condition_down2 = ResNet(d_model=d_model//2, d_condition=2*d_model, kernel_size=2, layers=resnet_layers)
+		
+		# bottleneck
+		self.conv_bottleneck = nn.Sequential(	nn.SiLU(),
+												nn.GroupNorm(d_model//32, d_model//2),
+												nn.Conv3d(d_model//2, d_model, 1, stride=1, padding=0, bias=True),											
+										)
+		self.condition_bottleneck = ResNet(d_model=d_model, d_condition=2*d_model, kernel_size=1, layers=resnet_layers)
+
+		# condition the nodes before message passing and after each layer
+		self.node_conditionings = nn.ModuleList([FiLM_Node(d_model=d_model, d_condition=2*d_model) for _ in range(mpnn_layers+1)])
+		self.mpnns = nn.ModuleList([MPNN(d_model=d_model, update_edges=False) for _ in range(mpnn_layers)])
+
+		# prep and up conv to 2x2x2
+		self.conv_up1 = nn.Sequential(	nn.SiLU(),
+										nn.GroupNorm(d_model//16, d_model),
+										nn.ConvTranspose3d(d_model, d_model//4, 2, stride=2, padding=0, output_padding=0, bias=True)
+									)
+		self.convpost_up1 = nn.Sequential(	nn.SiLU(),
+											nn.GroupNorm(d_model//32, d_model//2),
+											nn.Conv3d(d_model//2, d_model//4, 3, stride=1, padding=1, bias=True),											
+										)
+		self.condition_up1 = ResNet(d_model=d_model//4, d_condition=2*d_model, kernel_size=2, layers=resnet_layers)
+
+		# prep and up conv to 4x4x4
+		self.conv_up2 = nn.Sequential(	nn.SiLU(),
+										nn.GroupNorm(d_model//64, d_model//4),
+										nn.ConvTranspose3d(d_model//4, d_model//8, 2, stride=2, padding=0, output_padding=0, bias=True)
+										
+									)
+		self.convpost_up2 = nn.Sequential(	nn.SiLU(),
+											nn.GroupNorm(d_model//64, d_model//4),
+											nn.Conv3d(d_model//4, d_model//8, 3, stride=1, padding=1, bias=True)
+										)									
+		self.condition_up2 = ResNet(d_model=d_model//8, d_condition=2*d_model, kernel_size=2, layers=resnet_layers)
+
+
+		# final projection to original latent dim, essentially a linear layer since kernel=1
+		self.conv_noise = nn.Conv3d(d_model//8, d_latent, 1, stride=1, padding="same")
+
+	def forward(self, latent, t, nodes, edges, nbrs, nbr_mask):
+
+		# ------------------------------------------------------------------------
+
+		# prep
+		ZN, d_latent, Vx, Vy, Vz = latent.shape
+		Z, N, d_model = nodes.shape
+		nodes = nodes.reshape(ZN, d_model) # reshape to make conditioning easier
+
+		# define conditioning using orig node states and timestep
+		condition = torch.cat([nodes, t], dim=1) # ZN,2*d_model
+
+		# increase channels
+		conv_feature = self.conv_feature(latent) # ZN,16,4,4,4
+		condition_feature = self.condition_feature(conv_feature, condition) # ZN,16,4,4,4
+
+		# ------------------------------------------------------------------------
+
+		# downsample with strided conv and condition
+		conv_down1 = self.conv_down1(condition_feature) # ZN,32,2,2,2
+		condition_down1 = self.condition_down1(conv_down1, condition) # ZN,32,2,2,2
+
+		conv_down2 = self.conv_down2(condition_down1) # ZN,64,1,1,1
+		condition_down2 = self.condition_down2(conv_down2, condition) # ZN,64,1,1,1
+
+		# ------------------------------------------------------------------------
+
+		# bottleneck 
+		conv_bottleneck = self.conv_bottleneck(condition_down2) # ZN,128,1,1,1
+		condition_bottleneck = self.condition_bottleneck(conv_bottleneck, condition) # ZN,128,1,1,1
+
+		# ------------------------------------------------------------------------
+
+		# # reshape for the mpnn layer and condition nodes on latent state
+		# node_condition = torch.cat([condition_bottleneck.reshape(Z, N, d_model), t.reshape(Z, N, d_model)], dim=2)
+		# nodes = nodes.reshape(Z,N,d_model)
+
+		# # first conditioning so the first layer sees latent states
+		# nodes = self.node_conditionings[0](nodes, node_condition) # Z,N,128
+		
+		# # do message passing to see the other latents' states, continue conditioning at each layer
+		# for mpnn, node_conditioning in zip(self.mpnns, self.node_conditionings[1:]):
+		# 	nodes = mpnn(nodes, edges, nbrs, nbr_mask) # Z,N,128
+		# 	nodes = node_conditioning(nodes, node_condition)
+		# nodes = nodes.reshape(ZN,d_model) # reshape nodes back to be compatible with latents
+
+		# # update the conditioning, timestep and UPDATED nodes
+		# condition = torch.cat([nodes, t], dim=1)
+
+		# ------------------------------------------------------------------------
+
+		# upsample
+		conv_up1 = torch.cat([self.conv_up1(condition_bottleneck), condition_down1], dim=1) # ZN, 32+32=64, 2, 2, 2
+		convpost_up1 = self.convpost_up1(conv_up1) # ZN,32,2,2,2
+		condition_up1 = self.condition_up1(convpost_up1, condition) # ZN,32,2,2,2
+
+		conv_up2 = torch.cat([self.conv_up2(condition_up1), condition_feature], dim=1) # ZN, 16+16=32, 4, 4, 4
+		convpost_up2 = self.convpost_up2(conv_up2) # ZN,16,4,4,4
+		condition_up2 = self.condition_up2(convpost_up2, condition) # ZN, 16, 4, 4, 4
+
+		# ------------------------------------------------------------------------
+
+		# project to latent dim to get noise predictions
+		noise_pred = self.conv_noise(condition_up2) # ZN,4,4,4,4
+
+		# reshape
+		noise_pred = noise_pred.reshape(Z, N, d_latent, Vx, Vy, Vz)
+
+		return noise_pred
+
+		# ------------------------------------------------------------------------
+
+class ResNet(nn.Module):
+	def __init__(self, d_model=128, d_condition=128, kernel_size=2, layers=1):
+
+		super().__init__()
+
+		self.convs = nn.ModuleList([	nn.Sequential(	nn.SiLU(),
+														nn.GroupNorm(max(d_model//16,1), d_model),
+														nn.Conv3d(d_model, d_model, kernel_size, stride=1, padding="same")
+													) 
+										for _ in range(layers)
+									])
+		self.conditionings = nn.ModuleList([FiLM_Latent(d_model=d_model, d_condition=d_condition) for _ in range(layers)])
+
+	def forward(self, latent, condition):
+		
+		for conv, conditioning in zip(self.convs, self.conditionings):
+			latent = latent + conditioning(conv(latent), condition)
+
+		return latent
+
+# FiLM for different shapes 
+class FiLM_Latent(nn.Module):
+	def __init__(self, d_model=128, d_condition=128):
+		super().__init__()
+		self.gamma_beta = MLP(d_in=d_condition, d_out=2*d_model, d_hidden=d_model, hidden_layers=1, act="silu", dropout=0.0)
+	def forward(self, latent, condition): # assumes they are the same shape
+		gamma_beta = self.gamma_beta(condition) # ZN,d_condituib
+		ZN, two_d_model = gamma_beta.shape
+		gamma, beta = torch.chunk(gamma_beta.reshape(ZN,two_d_model,1,1,1), dim=1, chunks=2)
+		return gamma*latent + beta
+
+class FiLM_Node(nn.Module):
+	def __init__(self, d_model=128, d_condition=128):
+		super().__init__()
+		self.gamma_beta = MLP(d_in=d_condition, d_out=2*d_model, d_hidden=d_model, hidden_layers=1, act="silu", dropout=0.0)
+	def forward(self, nodes, condition): # assumes they are the same shape
+		gamma_beta = self.gamma_beta(condition) # Z, N, 2dmodel
+		gamma, beta = torch.chunk(gamma_beta, dim=-1, chunks=2)
+		return gamma*nodes + beta
+
+class FiLM(nn.Module):
+	def __init__(self, d_model=128, d_condition=128):
+		super().__init__()
+		self.gamma_beta = MLP(d_in=d_condition, d_out=2*d_model, d_hidden=d_model, hidden_layers=1, act="silu", dropout=0.0)
+	def forward(self, nodes, condition): # assumes they are the same shape
+		gamma_beta = self.gamma_beta(condition) # Z, N, 2dmodel
+		gamma, beta = torch.chunk(gamma_beta, dim=-1, chunks=2)
+		return gamma*nodes + beta
