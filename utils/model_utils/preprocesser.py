@@ -39,7 +39,10 @@ class PreProcesser(nn.Module):
 			# compute electric fields 
 			fields = self.compute_fields(C, L, local_voxels, atom_mask)
 
-		return C_backbone, fields
+			# compute divergence of the normed fields, hoping this is easier for diffusion
+			divergence = self.compute_divergence(fields)
+
+		return C_backbone, divergence
 
 	def get_backbone(self, C):
 
@@ -127,3 +130,39 @@ class PreProcesser(nn.Module):
 		fields = fields.permute(0,1,5,2,3,4)
 
 		return fields
+
+	def compute_divergence(self, fields):
+
+		'''
+		compute divergence of the electric field. field is normed so each cell has unit magnitude
+		this helps in smoothing the field and having the model only focus on direction, not magnitude
+		hope is that divergence, being a scalar valued function, will be easier to denoise, since unit vectors
+		live on S2, requiring brownian motion and riemann manifold denoising
+		divergence is computed using finite differences
+		'''
+
+		# div wrt x, also deal with boundaries
+		dxc = (fields[:, :, 0, 2:, :, :] - fields[:, :, 0, :-2, :, :]) / (2*self.res)
+		dx0 = (fields[:, :, 0, 1, :, :] - fields[:, :, 0, 0, :, :] ) / self.res
+		dxn = (fields[:, :, 0, -1, :, :] - fields[:, :, 0, -2, :, :] ) / self.res
+		dx = torch.cat([dx0.unsqueeze(2), dxc, dxn.unsqueeze(2)], dim=2)
+
+		# div wrt y
+		dyc = (fields[:, :, 1, 2:, :, :] - fields[:, :, 1, :-2, :, :]) / (2*self.res)
+		dy0 = (fields[:, :, 1, 1, :, :] - fields[:, :, 1, 0, :, :]) / self.res
+		dyn = (fields[:, :, 1, -2, :, :] - fields[:, :, 1, -1, :, :]) / self.res
+		dy = torch.cat([dy0.unsqueeze(2), dyc, dyn.unsqueeze(2)], dim=2)
+
+		# div wrt z
+		dzc = (fields[:, :, 2, 2:, :, :] - fields[:, :, 2, :-2, :, :]) / (2*self.res)
+		dz0 = (fields[:, :, 2, 1, :, :] - fields[:, :, 2, 0, :, :]) / self.res
+		dzn = (fields[:, :, 2, -2, :, :] - fields[:, :, 2, -1, :, :]) / self.res
+		dz = torch.cat([dz0.unsqueeze(2), dzc, dzn.unsqueeze(2)], dim=2)
+
+		# sum
+		div = dx + dy + dz
+
+		# keep a channel dim
+		div = div.unsqueeze(2)
+
+		return div

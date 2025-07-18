@@ -17,7 +17,7 @@ class ProteinDiff(nn.Module):
         '''
 
         self.prep = PreProcesser(voxel_dims=voxel_dims, cell_dim=cell_dim)
-        self.vae = VAE()
+        # self.vae = VAE()
         self.diffusion = Diffusion()
         self.classifier = Classifier()
 

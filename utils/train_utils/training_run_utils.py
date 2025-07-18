@@ -127,16 +127,16 @@ class Batch():
 		if self.train_type=="vae":
 			
 			# get the fields
-			_, fields = model.prep(self.coords, self.labels, self.atom_mask)
+			_, divergence = model.prep(self.coords, self.labels, self.atom_mask)
 
 			# get the encoder latents and decoder field predictions 
-			latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
+			# latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
 
 			# predict sequence from fields
-			seq_pred = model.classifier(fields_pred.detach()) # detach so classifier loss doesnt affect vae
+			seq_pred = model.classifier(divergence) # detach so classifier loss doesnt affect vae
 
 			# compute loss
-			losses = loss_function.vae(latent_mu, latent_logvar, fields_pred, fields, seq_pred, self.labels, self.loss_mask)
+			losses = loss_function.vae(seq_pred, self.labels, self.loss_mask)
 
 		# diffusion training
 		elif self.train_type=="diffusion":

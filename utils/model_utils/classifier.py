@@ -9,7 +9,7 @@ class Classifier(nn.Module):
 		# start at 3x16x16x16
 		self.classifier = nn.Sequential(
 										# increase channels, keep spatial res at 16x16x16
-										nn.Conv3d(3, 16, 3, stride=1, padding='same', bias=False),
+										nn.Conv3d(1, 16, 3, stride=1, padding='same', bias=False),
 										nn.GroupNorm(2, 16),
 										nn.SiLU(),
 

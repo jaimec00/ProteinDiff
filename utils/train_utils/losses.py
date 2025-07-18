@@ -56,9 +56,9 @@ class Losses():
 			self.losses = {"Mean Squared Error": []}
 		elif train_type=="vae":
 			self.losses = {	
-							"Full Loss": [],
-							"Cosine Similarity": [],
-							"KL Divergence": [],
+							# "Full Loss": [],
+							# "Cosine Similarity": [],
+							# "KL Divergence": [],
 							"Cross Entropy Loss": [],
 							"Top 1 Accuracy": [],
 							"Top 3 Accuracy": [],
@@ -169,26 +169,36 @@ class LossFunction():
 		probs_sum = (mask.unsqueeze(2)*torch.gather(probs, 2, (seq_true*mask).unsqueeze(2))).sum()
 		return probs_sum
 
-	def vae(self, latent_mean, latent_logvar, fields_pred, fields_true, seq_pred, seq_true, mask):
+	# def vae(self, latent_mean, latent_logvar, fields_pred, fields_true, seq_pred, seq_true, mask):
 
-		kl_div = self.kl_div(latent_mean, latent_logvar, mask)
-		cosine_similiarity = self.cosine_similiarity(fields_pred, fields_true, mask)
+	# 	kl_div = self.kl_div(latent_mean, latent_logvar, mask)
+	# 	cosine_similiarity = self.cosine_similiarity(fields_pred, fields_true, mask)
+	# 	cel = self.cel(seq_pred, seq_true, mask)
+	# 	matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true, mask)
+	# 	probs = self.compute_probs(seq_pred, seq_true, mask)
+
+	# 	full_loss = self.beta*kl_div + cosine_similiarity + cel
+
+	# 	losses = {	"Full Loss": full_loss,
+	# 				"KL Divergence": kl_div,
+	# 				"Cosine Similarity": cosine_similiarity,
+	# 				"Cross Entropy Loss": cel,					
+	# 				"Top 1 Accuracy": matches1,
+	# 				"Top 3 Accuracy": matches3,
+	# 				"Top 5 Accuracy": matches5,
+	# 				"True AA Predicted Probability": probs
+	# 			}
+
+	# 	return losses
+
+	def vae(self, seq_pred, seq_true, mask):
 		cel = self.cel(seq_pred, seq_true, mask)
-		matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true, mask)
-		probs = self.compute_probs(seq_pred, seq_true, mask)
-
-		full_loss = self.beta*kl_div + cosine_similiarity + cel
-
-		losses = {	"Full Loss": full_loss,
-					"KL Divergence": kl_div,
-					"Cosine Similarity": cosine_similiarity,
-					"Cross Entropy Loss": cel,					
+		losses = {	"Cross Entropy Loss": cel,					
 					"Top 1 Accuracy": matches1,
 					"Top 3 Accuracy": matches3,
 					"Top 5 Accuracy": matches5,
 					"True AA Predicted Probability": probs
 				}
-
 		return losses
 
 	def diff(self, noise_pred, noise_true, mask):
