@@ -51,6 +51,25 @@ class MLP(nn.Module):
 
 		return x
 
+class ResNet(nn.Module):
+	def __init__(self, d_model=128, kernel_size=2, layers=1):
+
+		super().__init__()
+
+		self.convs = nn.ModuleList([	nn.Sequential(	nn.Conv3d(d_model, d_model, kernel_size, stride=1, padding="same", bias=False),
+														nn.GroupNorm(max(d_model//16,1), d_model),
+														nn.SiLU()
+													) 
+										for _ in range(layers)
+									])
+
+	def forward(self, latent):
+		
+		for conv in self.convs:
+			latent = latent + conv(latent)
+
+		return latent
+
 # initializations for linear layers
 def init_orthogonal(m):
 	if isinstance(m, nn.Linear):

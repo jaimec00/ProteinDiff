@@ -5,18 +5,18 @@ import numpy as np
 import plotly.graph_objects as go
 
 def main():
+
     # load a sample pt file
-    sample = "4l3o_A"
-    # sample_data = f"/work/hcardenas1/projects/ProteinDiff/data/processed/pdb/{sample[1:3]}/{sample}.pt"
-    sample_data = f"/home/jaime/Desktop/ProteinDiff/test_data/pdb_2021aug02_sample/pdb/{sample[1:3]}/{sample}.pt"
+    sample = "4l3o_0"
+    sample_data = f"/work/hcardenas1/projects/ProteinDiff/data/processed/pdb/{sample[1:3]}/{sample}.pt"
     pt = torch.load(sample_data, weights_only=True, map_location="cpu")
 
     # load atomic coordinates, labels, atom mask, and create kp mask (positions w/ no atoms or labels=-1)
     # unsqueeze to simulate batches
-    C = pt["xyz"].unsqueeze(0)
+    C = pt["coords"].unsqueeze(0)
     C = C.masked_fill(C.isnan(), 0.0) # get rid of nans
-    L = torch.tensor([aa_2_lbl(aa) for aa in pt["seq"]]).unsqueeze(0)
-    atom_mask = pt["mask"].unsqueeze(0)
+    L = pt["labels"].unsqueeze(0)
+    atom_mask = pt["atom_mask"].unsqueeze(0)
 
     # instantiate the preprocessor and run it
     voxel_dims = (16,16,16)
@@ -25,18 +25,16 @@ def main():
     C_backbone, div = prep(C, L, atom_mask)
 
     # choose a residue, extract its voxel vector field, and print its AA
-    resi = 82
-    voxel_vectors = div[0,resi,:,:,:] # Vx,Vy,Vz
+    resi = 2
+    voxel_vectors = div[0,resi,0,:,:,:] # Vx,Vy,Vz
     aa = lbl_2_aa(L[0,resi])
     pdb = sample[:4]
     chain = sample[5]
-    plot_voxel(voxel_vectors, voxel_dims, cell_dim, f"3D Vector Field of Residue Electrostatics | PDB: {pdb} | Chain: {chain} | Position: {resi} | Amino Acid: {aa}", "/hpc/home/hcardenas1/ProteinDiff/docs/img/div.png")
+    plot_voxel(voxel_vectors, voxel_dims, cell_dim, f"E Field Divergence | PDB: {pdb} | Chain: {chain} | Position: {resi} | Amino Acid: {aa}", "true.png")
 
     # # also show noise
-    # noise = torch.randn_like(voxel_vectors)
-    # noise_norm = torch.linalg.vector_norm(noise, dim=0, keepdim=True)
-    # noise = noise / noise_norm.masked_fill(noise_norm==0,1)
-    # plot_voxel(noise, voxel_dims, cell_dim,  "Gaussian Noise", "/hpc/home/hcardenas1/ProteinDiff/docs/img/noise.png")
+    noise = torch.randn_like(voxel_vectors)
+    plot_voxel(noise, voxel_dims, cell_dim,  "Gaussian Noise", "noise.png")
 
 
 def plot_voxel(voxel_vectors, voxel_dims, cell_dim, title, path):
@@ -58,6 +56,13 @@ def plot_voxel(voxel_vectors, voxel_dims, cell_dim, title, path):
     Z = z.ravel()
 
     values = voxel_vectors.ravel()
+    
+    skip = values.abs() > 0.5
+
+    values = values[skip]
+    X = X[skip]
+    Y = Y[skip]
+    Z = Z[skip]
 
     fig = go.Figure(data=go.Scatter3d(
         x=X,
@@ -65,10 +70,10 @@ def plot_voxel(voxel_vectors, voxel_dims, cell_dim, title, path):
         z=Z,
         mode='markers',
         marker=dict(
-            size=6,  # control visual size of the voxel marker
+            size=5,  # control visual size of the voxel marker
             color=values,
             colorscale=['red', 'white', 'blue'],
-            opacity=0.5,
+            opacity=1.0,
             colorbar=dict(title='Value')
         )
     ))
@@ -90,9 +95,9 @@ def plot_voxel(voxel_vectors, voxel_dims, cell_dim, title, path):
     )
 
     # show
-    fig.show()
+    # fig.show()
 
-    # fig.write_image(path)
+    fig.write_image(path)
 
 if __name__=="__main__":
     main()

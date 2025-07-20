@@ -13,12 +13,13 @@ import logging
 import torch
 import math
 import sys
+import numpy as np
 
 # ----------------------------------------------------------------------------------------------------------------------
 
 class Output():
 
-	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):\
+	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):
 
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
@@ -112,10 +113,10 @@ class Output():
 			self.log.info(textwrap.dedent(f'''
 			
 				{'-'*80}
-				epoch {epoch}, step {step:,}: 
+				Epoch {epoch}, Step {step:,}: 
 				{'-'*80}
 				
-				current learning rate: {current_lr}
+				Current Learning Rate: {current_lr}
 			''')
 			)
 
@@ -143,7 +144,7 @@ class Output():
 
 		losses_dict = losses.tmp.get_avg()
 		for loss_type, loss in losses_dict.items():
-			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
+			self.log.info(f"{mode} {loss_type} Per Token: {str(loss)}")	
 		self.log.info("")
 		
 		if mode == "Train":

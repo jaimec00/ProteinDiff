@@ -7,15 +7,17 @@ description:	utility classes for training proteusAI
 # ----------------------------------------------------------------------------------------------------------------------
 
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 import torch.optim.lr_scheduler as lr_scheduler
-from tqdm import tqdm
-import os
-
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from ProteinDiff import ProteinDiff 
+from tqdm import tqdm
+import os
+
+from ProteinDiff import ProteinDiff, EMA
 from utils.train_utils.io_utils import Output
 from utils.train_utils.data_utils import DataHolder
 from utils.train_utils.training_run_utils import Epoch, Batch
@@ -72,6 +74,9 @@ class TrainingRun():
 		self.train()
 		self.test()
 
+		# done
+		self.log("Fin", fancy=True)
+
 	def setup_training(self, args):
 		'''
 		sets up the training by setting up the model, optimizer, scheduler, loss 
@@ -107,6 +112,8 @@ class TrainingRun():
 
 		self.checkpoint = torch.load(self.training_parameters.checkpoint.path, weights_only=True, map_location=self.gpu) if self.training_parameters.checkpoint.path else ""
 
+		self.scaler = torch.GradScaler("cuda", init_scale=32) if args.training_parameters.use_amp else None # start small, have it adjust later to avoid overflow early on 
+
 		self.setup_model()
 		self.setup_optim()
 		self.setup_scheduler()
@@ -131,6 +138,7 @@ class TrainingRun():
 		self.model = ProteinDiff()
 		# parallelize the model
 		self.model.to(self.gpu)
+
 		self.model = DDP(self.model, device_ids=[self.rank])
 
 		# load any checkpoints
@@ -146,6 +154,7 @@ class TrainingRun():
 		if self.training_parameters.train_type=="diffusion": # freeze vae if in diffusion
 			for param in self.model.module.vae.parameters():
 				param.requires_grad = False
+
 
 		# get number of parameters for logging
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.module.parameters())
@@ -173,7 +182,7 @@ class TrainingRun():
 			None
 		'''
 
-		self.log("loading optimizer...")
+		self.log("Loading Optimizer...")
 		self.optim = torch.optim.AdamW(	self.model.parameters(), lr=1.0,
 										betas=(self.training_parameters.adam.beta1, self.training_parameters.adam.beta2), 
 										eps=float(self.training_parameters.adam.epsilon), weight_decay=self.training_parameters.adam.weight_decay)
@@ -192,7 +201,7 @@ class TrainingRun():
 			None
 		'''
 
-		self.log("loading scheduler...")
+		self.log("Loading Scheduler...")
 
 		if self.training_parameters.lr.lr_type == "attn":
 
@@ -255,14 +264,14 @@ class TrainingRun():
 		'''
 
 		# load the data, note that all gpus are required to load all the data with the same random seeds, so they get unique data compared to other gpus each epoch
-		self.log("loading training data...")
+		self.log("Loading Training Data...")
 		self.data.load("train")
-		self.log("loading validation data...")
+		self.log("Loading Validation Data...")
 		self.data.load("val")
 
 		# log training info
-		self.log(f"\n\ninitializing training. "\
-					f"training on approx. {len(self.data.train_data)} batches "\
+		self.log(f"\n\nInitializing training. "\
+					f"Training on approx. {len(self.data.train_data)} batches "\
 					f"of batch size {self.data.batch_tokens} tokens "\
 					f"for {self.training_parameters.epochs} epochs.\n" 
 				)
@@ -278,16 +287,13 @@ class TrainingRun():
 			if self.training_converged(epoch_idx): break
 			
 		# announce trainnig is done
-		self.log(f"training done after {epoch.epoch} epochs", fancy=True)
+		self.log(f"Training Done After {epoch.epoch} Epochs", fancy=True)
 
 		# plot training losses
 		self.output.plot_training(self.losses)
 
 		# save the model
 		self.output.save_checkpoint(self.model, self.optim, self.scheduler, appended_str="final")
-
-		# done
-		self.log("fin", fancy=True)
 
 	def validation(self):
 		
@@ -300,12 +306,9 @@ class TrainingRun():
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
 
-		# logging
-		self.log("running validation...")
-
 		# progress bar
 		if self.rank == 0:
-			val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
+			val_pbar = tqdm(total=len(self.data.val_data), desc="Validation Progress", unit="Step")
 				
 		# turn off gradient calculation
 		with torch.no_grad():
@@ -331,10 +334,10 @@ class TrainingRun():
 		# switch to evaluation mode
 		self.model.eval()
 
-		self.log("starting testing", fancy=True)
+		self.log("Starting Testing", fancy=True)
 		
 		# load testing data
-		self.log("loading testing data...")
+		self.log("Loading Testing Data...")
 		self.data.load("test")
 
 		# init losses
@@ -345,7 +348,7 @@ class TrainingRun():
 
 		# progress bar
 		if self.rank == 0:
-			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
+			test_pbar = tqdm(total=len(self.data.test_data), desc="Test Progress", unit="Step")
 
 		# turn off gradient calculation
 		with torch.no_grad():

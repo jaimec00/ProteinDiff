@@ -105,7 +105,7 @@ class EpochBioUnits():
 			starts at max batch dim eg 64, and splits into 2
 			returns a list of lists, each inner list containing sample indexes and corresponding size
 			'''
-			if (sum(i[1] for i in batch_idxs) > self.batch_tokens) or (len(batch_idxs) > self.max_batch_size):
+			if ((sum(i[1] for i in batch_idxs) > self.batch_tokens) or (len(batch_idxs) > self.max_batch_size)) and (len(batch_idxs)>1): 
 				split = len(batch_idxs) // 2
 				return batch_subset(batch_idxs[:split]) + batch_subset(batch_idxs[split:])
 			else: 

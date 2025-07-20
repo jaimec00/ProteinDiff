@@ -11,7 +11,7 @@ config: "config/train.yml"
 # ------------------------------------------------------------------------------
 
 debug_grad: False
-port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+port: 29506 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------
 
@@ -24,11 +24,12 @@ hyper_parameters:
 # training params
 training_parameters:
   rng: 0 # for data loading
+  use_amp: True
   epochs: 1000  # number of epochs, training until convergence
-  train_type: "vae" # vae or diffusion are the options
+  train_type: "diffusion" # vae or diffusion are the options
   checkpoint: 
-    path: ""
-    vae: False
+    path: "/work/hcardenas1/projects/ProteinDiff/models/vae_extreme_compression_big_classifier/checkpoint_e19_s0.05.pth"
+    vae: True
     diff: False
     adam: False
     sched: False
@@ -48,9 +49,9 @@ training_parameters:
     homo_thresh: 0.70
   loss:
     accumulation_steps: 1
-    grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
+    grad_clip_norm: 0.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
     label_smoothing: 0.00
-    beta: !!float 5e-4
+    beta: !!float 1e-4
   lr:
     lr_type: "attn"
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
@@ -61,20 +62,20 @@ training_parameters:
 # dataset configs
 data:
   data_path: "/work/hcardenas1/projects/ProteinDiff/data/processed"  # path to data for multi-chain model (dataset from Dapauras et. al.)
-  num_train: -1  # number of training samples to use; -1 means all available
-  num_val: -1  # number of validation samples to use; -1 means all available
+  num_train: 128  # number of training samples to use; -1 means all available
+  num_val: 128  # number of validation samples to use; -1 means all available
   num_test: -1  # number of test samples to use; -1 means all available
   max_batch_size: 256  # maximum samples per batch
   min_seq_size: 16 # minimum sequence length, shorter is excluded
-  max_seq_size: 10000 # max sequence lengths, longer samples not included
-  batch_tokens: 10000 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
+  max_seq_size: 1024 # max sequence lengths, longer samples not included
+  batch_tokens: 1024 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
 
 # ------------------------------------------------------------------------------
 
 # Output
 output:
-  out_path: "/work/hcardenas1/projects/ProteinDiff/models/divergence_classifier"
+  out_path: "/work/hcardenas1/projects/ProteinDiff/models/overfit_attempt2"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

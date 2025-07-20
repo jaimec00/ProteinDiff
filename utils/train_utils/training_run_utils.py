@@ -16,7 +16,7 @@ class Epoch():
 
 	def training(self):
 		if self.train_type=="vae":
-			self.training_run_parent.model.module.vae.train()
+			# self.training_run_parent.model.module.vae.train()
 			self.training_run_parent.model.module.classifier.train()
 		elif self.train_type=="diffusion":
 			self.training_run_parent.model.module.diffusion.train()
@@ -38,7 +38,7 @@ class Epoch():
 
 		# init epoch pbar
 		if self.training_run_parent.rank==0:
-			epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
+			epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="Training Progress", unit="step")
 
 		# loop through batches
 		for b_idx, data_batch in enumerate(self.training_run_parent.data.train_data):
@@ -62,7 +62,7 @@ class Epoch():
 		# switch representative cluster samples
 		if self.epoch < (self.epochs - 1):
 			if self.training_run_parent.rank==0:
-				self.training_run_parent.output.log.info("loading next epoch's training data...")
+				self.training_run_parent.output.log.info("Loading Next Epoch's Training Data...")
 			self.training_run_parent.data.train_data.rotate_data()
 			self.training_run_parent.data.val_data.rotate_data()
 
@@ -120,7 +120,7 @@ class Batch():
 		self.move_to(self.epoch_parent.training_run_parent.gpu)
 
 		# utils
-		model = self.epoch_parent.training_run_parent.model.module			
+		model = self.epoch_parent.training_run_parent.model.module	
 		loss_function = self.epoch_parent.training_run_parent.losses.loss_function
 
 		# for vae training
@@ -129,14 +129,17 @@ class Batch():
 			# get the fields
 			_, divergence = model.prep(self.coords, self.labels, self.atom_mask)
 
-			# get the encoder latents and decoder field predictions 
-			# latent, latent_mu, latent_logvar, fields_pred = model.vae(fields)
+			# divergence in fp32, the rest is autocast
+			with torch.autocast("cuda"):
 
-			# predict sequence from fields
-			seq_pred = model.classifier(divergence) # detach so classifier loss doesnt affect vae
+				# get the encoder latents and decoder field predictions 
+				latent, latent_mu, latent_logvar, divergence_pred = model.vae(divergence)
 
-			# compute loss
-			losses = loss_function.vae(seq_pred, self.labels, self.loss_mask)
+				# predict sequence from fields
+				seq_pred = model.classifier(divergence_pred.detach()) # detach so classifier loss doesnt affect vae
+
+				# compute loss
+				losses = loss_function.vae(latent_mu, latent_logvar, divergence_pred, divergence, seq_pred, self.labels, self.loss_mask)
 
 		# diffusion training
 		elif self.train_type=="diffusion":
@@ -147,35 +150,41 @@ class Batch():
 				# get coords
 				coords_bb = model.prep.get_backbone(self.coords)
 
-				# generate a latent from white noise
-				generated_latent = model.diffusion.generate(coords_bb, self.valid_mask)
+				# divergence in fp32, the rest is autocast
+				with torch.autocast("cuda"):
 
-				# predict the fields from generated latent
-				fields_pred = model.vae.dec(generated_latent)
+					# generate a latent from white noise
+					generated_latent = model.diffusion.generate(coords_bb, self.valid_mask)
 
-				# predict sequence
-				seq_pred = model.classifier(fields_pred)
+					# predict the fields from generated latent
+					divergence_pred = model.vae.dec(generated_latent)
 
-				# compute loss
-				losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
+					# predict sequence
+					seq_pred = model.classifier(divergence_pred)
+
+					# compute loss
+					losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
 			
 			else:
 
 				# run the prep to get the fields
-				coords_bb, fields = model.prep(self.coords, self.labels, self.atom_mask)
+				coords_bb, divergence = model.prep(self.coords, self.labels, self.atom_mask)
 
-				# sample a latent
-				latent, latent_mu, latent_logvar = model.vae.enc(fields)
+				# divergence in fp32, the rest is autocast
+				with torch.autocast("cuda"):
 
-				# get random timesteps and noise the latent
-				t = model.diffusion.get_rand_t_for(latent)
-				latent_noised, noise = model.diffusion.noise(latent, t)
+					# sample a latent
+					latent, latent_mu, latent_logvar = model.vae.enc(divergence)
 
-				# predict noise
-				noise_pred = model.diffusion(coords_bb, latent_noised, t, self.valid_mask)
+					# get random timesteps and noise the latent
+					t = model.diffusion.get_rand_t_for(latent)
+					latent_noised, v = model.diffusion.noise(latent, t)
 
-				# compute loss
-				losses = loss_function.diff(noise_pred, noise, self.loss_mask)
+					# predict noise
+					v_pred = model.diffusion(coords_bb, latent_noised, t, self.valid_mask)
+
+					# compute loss
+					losses = loss_function.diff(v_pred, v, self.loss_mask)
 
 		# add the losses to the temporary losses
 		self.epoch_parent.training_run_parent.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())
@@ -187,21 +196,33 @@ class Batch():
 		optim = self.epoch_parent.training_run_parent.optim
 		scheduler = self.epoch_parent.training_run_parent.scheduler
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
+		scaler = self.epoch_parent.training_run_parent.scaler 
 
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
 
 		# perform backward pass to accum grads
-		loss.backward()
+		if scaler is None:
+			loss.backward()
+		else:
+			scaler.scale(loss).backward()
 
 		if learn_step:
 		
-			# grad clip
-			if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
-				torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
+			if scaler is None:
+				# grad clip
+				if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
+					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.module.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
+				# step
+				optim.step()
+			else:
+				if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
+					scaler.unscale_(optimizer) # scaler sees that grads already unscaled when call step, no issue
+					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.module.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
 
-			# step
-			optim.step()
+				scaler.step(optim)
+				scaler.update()
+
 			optim.zero_grad()
 			scheduler.step()
 
@@ -216,3 +237,5 @@ class Batch():
 
 		# add noise
 		self.coords = self.coords + noise
+
+

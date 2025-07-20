@@ -56,9 +56,9 @@ class Losses():
 			self.losses = {"Mean Squared Error": []}
 		elif train_type=="vae":
 			self.losses = {	
-							# "Full Loss": [],
-							# "Cosine Similarity": [],
-							# "KL Divergence": [],
+							"Full Loss": [],
+							"Mean Squared Error": [],
+							"KL Divergence": [],
 							"Cross Entropy Loss": [],
 							"Top 1 Accuracy": [],
 							"Top 3 Accuracy": [],
@@ -71,7 +71,7 @@ class Losses():
 
 	def get_avg(self):
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
-		losses = {loss_type: sum(loss.item() for loss in loss_list) / self.valid_toks.item() for loss_type, loss_list in self.losses.items()}
+		losses = {loss_type: sum(loss.item() if isinstance(loss, torch.Tensor) else loss for loss in loss_list) / (self.valid_toks.item() if isinstance(self.valid_toks, torch.Tensor) else self.valid_toks) for loss_type, loss_list in self.losses.items()}
 		return losses
 
 	def add_losses(self, losses, valid_toks=1):
@@ -80,14 +80,15 @@ class Losses():
 		self.valid_toks += valid_toks
 
 	def extend_losses(self, other):
-		other.to(self.valid_toks.device)
+		if isinstance(self.valid_toks, torch.Tensor):
+			other.to(self.valid_toks.device)
 		for loss_type, losses in other.losses.items():
 			self.losses[loss_type].extend(losses)
 		self.valid_toks += other.valid_toks
 
 	def to(self, device):
-		self.losses = {loss_type: [loss.to(device) for loss in losses] for loss_type, losses in self.losses.items()}
-		self.valid_toks = self.valid_toks.to(device)
+		self.losses = {loss_type: [loss.to(device) if isinstance(loss, torch.Tensor) else loss for loss in losses] for loss_type, losses in self.losses.items()}
+		self.valid_toks = self.valid_toks.to(device) if isinstance(self.valid_toks, torch.Tensor) else self.valid_toks
 
 	def clear_losses(self):
 		self.losses = {loss_type: [] for loss_type in self.losses.keys()}
@@ -95,13 +96,13 @@ class Losses():
 
 	def to_numpy(self):
 		'''utility when plotting losses w/ matplotlib'''
-		self.losses = {loss_type: [loss.detach().to("cpu").numpy() for loss in losses] for loss_type, losses in self.losses.items()}
+		self.losses = {loss_type: [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else loss for loss in losses] for loss_type, losses in self.losses.items()}
 
 	def get_last_loss(self):
 		return self.losses[list(self.losses.keys())[0]][-1]
 
 	def __len__(self):
-		return len(list(self.losses.keys())[0])
+		return len(self.losses[list(self.losses.keys())[0]])
 
 # ----------------------------------------------------------------------------------------------------------------------
 # loss functions 
@@ -119,18 +120,6 @@ class LossFunction():
 		kl_div = -0.5*(1 + latent_logvar - latent_mean**2 - torch.exp(latent_logvar))*mask.view(Z,N,1,1,1,1)
 
 		return kl_div.sum()
-
-	def cosine_similiarity(self, fields_pred, fields_true, mask):
-
-		Z, N, S, Vx, Vy, Vz = fields_pred.shape
-
-		# both are already normed
-		cosine_similiarity = 1 - torch.sum(fields_pred * fields_true, dim=2) # Z,N,3,Vx,Vy,Vz --> Z,N,Vx,Vy,Vz
-		
-		# sum across valid samples and divide by number of cells
-		cosine_similiarity = torch.sum(cosine_similiarity * mask.view(Z,N,1,1,1)) / (Vx*Vy*Vz)
-
-		return cosine_similiarity
 
 	def mse(self, noise_pred, noise_true, mask):
 		Z, N, S, Vx, Vy, Vz = noise_pred.shape
@@ -169,37 +158,28 @@ class LossFunction():
 		probs_sum = (mask.unsqueeze(2)*torch.gather(probs, 2, (seq_true*mask).unsqueeze(2))).sum()
 		return probs_sum
 
-	# def vae(self, latent_mean, latent_logvar, fields_pred, fields_true, seq_pred, seq_true, mask):
+	def vae(self, latent_mean, latent_logvar, fields_pred, fields_true, seq_pred, seq_true, mask):
 
-	# 	kl_div = self.kl_div(latent_mean, latent_logvar, mask)
-	# 	cosine_similiarity = self.cosine_similiarity(fields_pred, fields_true, mask)
-	# 	cel = self.cel(seq_pred, seq_true, mask)
-	# 	matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true, mask)
-	# 	probs = self.compute_probs(seq_pred, seq_true, mask)
-
-	# 	full_loss = self.beta*kl_div + cosine_similiarity + cel
-
-	# 	losses = {	"Full Loss": full_loss,
-	# 				"KL Divergence": kl_div,
-	# 				"Cosine Similarity": cosine_similiarity,
-	# 				"Cross Entropy Loss": cel,					
-	# 				"Top 1 Accuracy": matches1,
-	# 				"Top 3 Accuracy": matches3,
-	# 				"Top 5 Accuracy": matches5,
-	# 				"True AA Predicted Probability": probs
-	# 			}
-
-	# 	return losses
-
-	def vae(self, seq_pred, seq_true, mask):
+		kl_div = self.kl_div(latent_mean, latent_logvar, mask)
+		mse = self.mse(fields_pred, fields_true, mask)
 		cel = self.cel(seq_pred, seq_true, mask)
-		losses = {	"Cross Entropy Loss": cel,					
+		matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true, mask)
+		probs = self.compute_probs(seq_pred, seq_true, mask)
+
+		full_loss = self.beta*kl_div + mse + cel
+
+		losses = {	"Full Loss": full_loss,
+					"KL Divergence": kl_div,
+					"Mean Squared Error": mse,
+					"Cross Entropy Loss": cel,					
 					"Top 1 Accuracy": matches1,
 					"Top 3 Accuracy": matches3,
 					"Top 5 Accuracy": matches5,
 					"True AA Predicted Probability": probs
 				}
+
 		return losses
+
 
 	def diff(self, noise_pred, noise_true, mask):
 		mse = self.mse(noise_pred, noise_true, mask)
@@ -215,7 +195,7 @@ class LossFunction():
 		losses = {	"Cross Entropy Loss": cel,					
 					"Top 1 Accuracy": matches1,
 					"Top 3 Accuracy": matches3,
-					"Top 5 Accuracy": macthes5,
+					"Top 5 Accuracy": matches5,
 					"True AA Predicted Probability": probs
 				}
 
