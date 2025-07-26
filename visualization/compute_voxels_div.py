@@ -30,11 +30,11 @@ def main():
     aa = lbl_2_aa(L[0,resi])
     pdb = sample[:4]
     chain = sample[5]
-    plot_voxel(voxel_vectors, voxel_dims, cell_dim, f"E Field Divergence | PDB: {pdb} | Chain: {chain} | Position: {resi} | Amino Acid: {aa}", "true.png")
+    plot_voxel(voxel_vectors, voxel_dims, cell_dim, f"E Field Divergence | PDB: {pdb} | Chain: {chain} | Position: {resi} | Amino Acid: {aa}", "visualization/true.png")
 
     # # also show noise
     noise = torch.randn_like(voxel_vectors)
-    plot_voxel(noise, voxel_dims, cell_dim,  "Gaussian Noise", "noise.png")
+    plot_voxel(noise, voxel_dims, cell_dim,  "Gaussian Noise", "visualization/noise.png")
 
 
 def plot_voxel(voxel_vectors, voxel_dims, cell_dim, title, path):
@@ -57,8 +57,8 @@ def plot_voxel(voxel_vectors, voxel_dims, cell_dim, title, path):
 
     values = voxel_vectors.ravel()
     
+    # skip small values for better visualization
     skip = values.abs() > 0.5
-
     values = values[skip]
     X = X[skip]
     Y = Y[skip]

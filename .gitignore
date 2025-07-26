@@ -13,3 +13,4 @@ results*
 models/
 test/
 test_data/
+runs/

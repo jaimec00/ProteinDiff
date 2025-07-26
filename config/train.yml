@@ -11,24 +11,32 @@ config: "config/train.yml"
 # ------------------------------------------------------------------------------
 
 debug_grad: False
-port: 29506 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------
 
 # hyperparameters
 hyper_parameters:
-  # still testing
+  d_model: 256
+  d_diffusion: 256
+  d_latent: 16 
+  top_k: 16
+  voxel_dims: 8
+  cell_dim: 1.0
+  vae_layers: 1
+  diff_layers: 48
+  class_layers: 1
 
 # ------------------------------------------------------------------------------
 
 # training params
 training_parameters:
   rng: 0 # for data loading
-  use_amp: True
+  use_amp: False
   epochs: 1000  # number of epochs, training until convergence
   train_type: "diffusion" # vae or diffusion are the options
   checkpoint: 
-    path: "/work/hcardenas1/projects/ProteinDiff/models/vae_extreme_compression_big_classifier/checkpoint_e19_s0.05.pth"
+    path: "/work/hcardenas1/projects/ProteinDiff/models/vae/nocross/checkpoint_e169_s0.17.pth"
     vae: True
     diff: False
     adam: False
@@ -37,7 +45,7 @@ training_parameters:
     temperature: !!float 1e-6
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
-    tolerance: 15 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
+    tolerance: 50 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
   adam:
     beta1: 0.90  # decay rate of momentum term
     beta2: 0.98  # decay rate of variance term
@@ -51,10 +59,10 @@ training_parameters:
     accumulation_steps: 1
     grad_clip_norm: 0.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
     label_smoothing: 0.00
-    beta: !!float 1e-4
+    beta: !!float 1e-3
   lr:
-    lr_type: "attn"
-    lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
+    lr_type: "static"
+    lr_step: !!float 1e-4 # max lr, ramps up to this val before decreasing  
     warmup_steps: 4000 # number of warmup steps before decreasing
 
 # ------------------------------------------------------------------------------
@@ -62,20 +70,20 @@ training_parameters:
 # dataset configs
 data:
   data_path: "/work/hcardenas1/projects/ProteinDiff/data/processed"  # path to data for multi-chain model (dataset from Dapauras et. al.)
-  num_train: 128  # number of training samples to use; -1 means all available
-  num_val: 128  # number of validation samples to use; -1 means all available
+  num_train: -1  # number of training samples to use; -1 means all available
+  num_val: -1  # number of validation samples to use; -1 means all available
   num_test: -1  # number of test samples to use; -1 means all available
   max_batch_size: 256  # maximum samples per batch
   min_seq_size: 16 # minimum sequence length, shorter is excluded
-  max_seq_size: 1024 # max sequence lengths, longer samples not included
-  batch_tokens: 1024 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
+  max_seq_size: 10000 # max sequence lengths, longer samples not included
+  batch_tokens: 10000 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
 
 # ------------------------------------------------------------------------------
 
 # Output
 output:
-  out_path: "/work/hcardenas1/projects/ProteinDiff/models/overfit_attempt2"
+  out_path: "/work/hcardenas1/projects/ProteinDiff/models/diffusion_big/test1"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

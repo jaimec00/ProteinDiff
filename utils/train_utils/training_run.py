@@ -17,7 +17,7 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 import os
 
-from ProteinDiff import ProteinDiff, EMA
+from ProteinDiff import ProteinDiff
 from utils.train_utils.io_utils import Output
 from utils.train_utils.data_utils import DataHolder
 from utils.train_utils.training_run_utils import Epoch, Batch
@@ -99,7 +99,7 @@ class TrainingRun():
 								args.data.min_seq_size, args.data.max_seq_size, 
 								args.data.max_resolution,
 								args.training_parameters.regularization.homo_thresh, 
-								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae is trained on individual side chains, no need to make copies 
+								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae and classifier are dont have residues communicate, no need for copies
 								rank=self.rank, world_size=self.world_size, rng=self.training_parameters.rng
 							)
 		
@@ -135,7 +135,16 @@ class TrainingRun():
 		
 		self.log("loading model...")
 		
-		self.model = ProteinDiff()
+		self.model = ProteinDiff(	d_model=self.hyper_parameters.d_model, 
+									d_diffusion=self.hyper_parameters.d_diffusion, 
+									d_latent=self.hyper_parameters.d_latent, 
+									top_k=self.hyper_parameters.top_k, 
+									voxel_dims=self.hyper_parameters.voxel_dims, 
+									cell_dim=self.hyper_parameters.cell_dim,
+									vae_layers=self.hyper_parameters.vae_layers,
+									diff_layers=self.hyper_parameters.diff_layers,
+									class_layers=self.hyper_parameters.class_layers
+								)
 		# parallelize the model
 		self.model.to(self.gpu)
 

@@ -2,61 +2,46 @@ import torch
 import torch.nn as nn
 from data.constants import canonical_aas
 from utils.model_utils.base_modules import ResNet
+import math
 
 class Classifier(nn.Module):
-	def __init__(self):
+	def __init__(self, voxel_dim=16, d_model=256, resnet_layers=3):
 		super().__init__()
 
-		# start at 3x16x16x16
-		self.classifier = nn.Sequential(
-										# increase channels, keep spatial res at 16x16x16
-										nn.Conv3d(1, 16, 2, stride=1, padding='same', bias=False),
-										nn.GroupNorm(2, 16),
-										nn.SiLU(),
+		num_downsample = math.log(voxel_dim, 2)
+		d_start = d_model // voxel_dim
 
-										ResNet(d_model=16, kernel_size=2, layers=1),
+		self.featurizer = nn.Sequential(   # increase channels, keep spatial res
+											nn.Conv3d(1, d_start, 2, stride=1, padding='same', bias=False),
+											nn.GroupNorm(d_start//8, d_start),
+											nn.SiLU(),
+											ResNet(d_model=d_start,kernel_size=2,layers=resnet_layers)
+										)
 
-										# downsample 8x8x8
-										nn.Conv3d(16, 32, 2, stride=2, padding=0, bias=False),
-										nn.GroupNorm(4, 32),
-										nn.SiLU(),
+		# halve spatial dims, double feature channels each time
+		self.downsamples = nn.ModuleList([	nn.Sequential(
+															nn.Conv3d(d_start*(2**i), d_start*(2**(i+1)), 2, stride=2, padding=0, bias=False),
+															nn.GroupNorm(d_start*(2**(i+1))//8, d_start*(2**(i+1))),
+															nn.SiLU(),
+															ResNet(d_model=d_start*(2**(i+1)),kernel_size=2,layers=resnet_layers),
+														) 
+											for i in range(int(num_downsample))
+										])
 
-										ResNet(d_model=32, kernel_size=2, layers=1),
+		self.classify = nn.Linear(d_model, len(canonical_aas))
 
-										# downsample 4x4x4
-										nn.Conv3d(32, 64, 2, stride=2, padding=0, bias=False),
-										nn.GroupNorm(8, 64),
-										nn.SiLU(),
+	def forward(self, voxels):
 
-										ResNet(d_model=64, kernel_size=2, layers=1),
+		Z, N, Cin, Vx, Vy, Vz = voxels.shape
+		features = self.featurizer(voxels.reshape(Z*N, Cin, Vx, Vy, Vz))
 
-										# downsample 2x2x2
-										nn.Conv3d(64, 128, 2, stride=2, padding=0, bias=False),
-										nn.GroupNorm(16, 128),
-										nn.SiLU(),
-										
-										ResNet(d_model=128, kernel_size=2, layers=1),
-
-										# downsample 1x1x1
-										nn.Conv3d(128, 256, 2, stride=2, padding=0, bias=False),
-										nn.GroupNorm(16, 256),
-
-										ResNet(d_model=256, kernel_size=2, layers=1),
-
-									) 
-
-		self.classify = nn.Linear(256, len(canonical_aas))
-
-
-	def forward(self, fields):
-
-		Z, N, Cin, Vx, Vy, Vz = fields.shape
-		fields = self.classifier(fields.reshape(Z*N, Cin, Vx, Vy, Vz))
+		for downsample in self.downsamples:
+			features = downsample(features)
 
 		# output is Z*N, Cout, 1,1,1 so reshape to Z,N,Cout
-		fields = fields.reshape(Z, N, -1)
+		features = features.reshape(Z, N, -1)
 
 		# project to amino acids, Z,N,20
-		aas = self.classify(fields)
+		aas = self.classify(features)
 
 		return aas

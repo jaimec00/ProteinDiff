@@ -88,6 +88,7 @@ class Batch():
 		self.train_type = epoch.train_type
 		self.world_size = epoch.training_run_parent.world_size
 		self.rank = epoch.training_run_parent.rank
+		self.scaler =epoch.training_run_parent.scaler 
 
 	def move_to(self, device):
 
@@ -126,20 +127,14 @@ class Batch():
 		# for vae training
 		if self.train_type=="vae":
 			
-			# get the fields
-			_, divergence = model.prep(self.coords, self.labels, self.atom_mask)
-
-			# divergence in fp32, the rest is autocast
-			with torch.autocast("cuda"):
-
-				# get the encoder latents and decoder field predictions 
-				latent, latent_mu, latent_logvar, divergence_pred = model.vae(divergence)
-
-				# predict sequence from fields
-				seq_pred = model.classifier(divergence_pred.detach()) # detach so classifier loss doesnt affect vae
-
-				# compute loss
-				losses = loss_function.vae(latent_mu, latent_logvar, divergence_pred, divergence, seq_pred, self.labels, self.loss_mask)
+			if self.scaler is None:
+				latent_mu, latent_logvar, divergence_pred, divergence, seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="vae")
+			else:
+				with torch.autocast("cuda"):
+					latent_mu, latent_logvar, divergence_pred, divergence, seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="vae")
+				
+			# compute loss
+			losses = loss_function.vae(latent_mu, latent_logvar, divergence_pred, divergence, seq_pred, self.labels, self.loss_mask)
 
 		# diffusion training
 		elif self.train_type=="diffusion":
@@ -147,44 +142,26 @@ class Batch():
 			# inference only applicable after train diffusion
 			if self.inference:
 
-				# get coords
-				coords_bb = model.prep.get_backbone(self.coords)
-
 				# divergence in fp32, the rest is autocast
-				with torch.autocast("cuda"):
+				if self.scaler is None:
+					seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="inference")
+				else:
+					with torch.autocast("cuda"):
+						seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="inference")
 
-					# generate a latent from white noise
-					generated_latent = model.diffusion.generate(coords_bb, self.valid_mask)
-
-					# predict the fields from generated latent
-					divergence_pred = model.vae.dec(generated_latent)
-
-					# predict sequence
-					seq_pred = model.classifier(divergence_pred)
-
-					# compute loss
-					losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
+				# compute loss
+				losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
 			
 			else:
 
-				# run the prep to get the fields
-				coords_bb, divergence = model.prep(self.coords, self.labels, self.atom_mask)
+				if self.scaler is None:
+					velocity_pred, velocity = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
+				else:
+					with torch.autocast("cuda"):
+						velocity_pred, velocity = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
 
-				# divergence in fp32, the rest is autocast
-				with torch.autocast("cuda"):
-
-					# sample a latent
-					latent, latent_mu, latent_logvar = model.vae.enc(divergence)
-
-					# get random timesteps and noise the latent
-					t = model.diffusion.get_rand_t_for(latent)
-					latent_noised, v = model.diffusion.noise(latent, t)
-
-					# predict noise
-					v_pred = model.diffusion(coords_bb, latent_noised, t, self.valid_mask)
-
-					# compute loss
-					losses = loss_function.diff(v_pred, v, self.loss_mask)
+				# compute loss
+				losses = loss_function.diff(velocity_pred, velocity, self.loss_mask)
 
 		# add the losses to the temporary losses
 		self.epoch_parent.training_run_parent.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())
@@ -196,20 +173,19 @@ class Batch():
 		optim = self.epoch_parent.training_run_parent.optim
 		scheduler = self.epoch_parent.training_run_parent.scheduler
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
-		scaler = self.epoch_parent.training_run_parent.scaler 
 
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
 
 		# perform backward pass to accum grads
-		if scaler is None:
+		if self.scaler is None:
 			loss.backward()
 		else:
-			scaler.scale(loss).backward()
+			self.scaler.scale(loss).backward()
 
 		if learn_step:
 		
-			if scaler is None:
+			if self.scaler is None:
 				# grad clip
 				if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
 					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.module.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
@@ -217,14 +193,14 @@ class Batch():
 				optim.step()
 			else:
 				if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
-					scaler.unscale_(optimizer) # scaler sees that grads already unscaled when call step, no issue
+					self.scaler.unscale_(optim) # scaler sees that grads already unscaled when call step, no issue
 					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.module.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
 
-				scaler.step(optim)
-				scaler.update()
+				self.scaler.step(optim)
+				self.scaler.update()
 
-			optim.zero_grad()
 			scheduler.step()
+			optim.zero_grad()
 
 			self.epoch_parent.training_run_parent.step += 1
 

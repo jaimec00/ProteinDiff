@@ -16,11 +16,12 @@ class PreProcesser(nn.Module):
 		self.register_buffer("amber_partial_charges", amber_partial_charges)
 		self.res = cell_dim 
 
-	def forward(self, C, L, atom_mask):
+	def forward(self, C, L, atom_mask, valid_mask):
 		'''
 		C (torch.Tensor): full atomic coordinates of shape (Z,N,A,3)
 		L (torch.Tensor): amino acid class labels of shape (Z,N)
 		atom_mask (torch.Tensor): mask indicating missing atom coordinates of shape (Z,N,A)
+		valid_mask (torch.Tensor): mask indicating which positions should be used for computation (e.g. neighbors computation)
 		'''
 
 		# no gradients here, as that would blow everything up, and this is all physics-based preprocessing, no learning

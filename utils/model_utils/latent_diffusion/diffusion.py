@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
-from utils.model_utils.latent_diffusion.diffusion_utils import NodeDenoiser, BetaScheduler, CosineScheduler
+from utils.model_utils.latent_diffusion.diffusion_utils import NodeDenoiser, CosineScheduler
 
 class Diffusion(nn.Module):
-	def __init__(self, d_model=256, top_k=32, d_latent=16, layers=12, t_max=1000):
+	def __init__(self, d_model=256, d_latent=16, layers=12, t_max=1000, min_rbf=2.0, max_rbf=22.0, num_rbf=16):
 		super().__init__()
 
 		self.d_latent = d_latent
@@ -11,14 +11,14 @@ class Diffusion(nn.Module):
 		self.noise_scheduler = CosineScheduler(t_max)
 
 		self.latent_proj = nn.Linear(d_latent, d_model)
-		self.denoiser = NodeDenoiser(d_model=d_model, top_k=top_k, layers=layers)
+		self.denoiser = NodeDenoiser(d_model=d_model, layers=layers, min_rbf=min_rbf, max_rbf=max_rbf, num_rbf=num_rbf)
 		self.v_proj = nn.Linear(d_model, d_latent, bias=False)
 	
-	def forward(self, coords_bb, latent, t, valid_mask):
+	def forward(self, latent, t, C_backbone, valid_mask):
 		
 		Z, N, d_latent, Vx, Vy, Vz = latent.shape
 		latent = latent.reshape(Z, N, d_latent)
-		edges, nbrs, nbr_mask = self.denoiser.get_constants(coords_bb, valid_mask)
+		edges, nbrs, nbr_mask = self.denoiser.get_constants(C_backbone, valid_mask)
 
 		v_pred = self.denoise(latent, t, edges, nbrs, nbr_mask).reshape(Z, N, d_latent, Vx, Vy, Vz)
 		
@@ -31,27 +31,24 @@ class Diffusion(nn.Module):
 
 		latent = self.denoiser(latent, t, edges, nbrs, nbr_mask)
 
-		v_pred = self.v_proj(latent)
+		velocity_pred = self.v_proj(latent)
 
-		return v_pred
+		return velocity_pred
 
 	def noise(self, latent, t):
 		abars = self.noise_scheduler.get_abars(t).view(-1,1,1,1,1,1)
 		noise = torch.randn_like(latent)
 		noised_latent = (abars**0.5)*latent + ((1 - abars)**0.5)*noise
+		velocity = (abars**0.5)*noise - ((1 - abars)**0.5)*latent
 
-		v = (abars**0.5)*noise - ((1 - abars)**0.5)*latent
+		return noised_latent, velocity
 
-		return noised_latent, v
-
-	def generate(self, coords_bb, valid_mask):
+	def generate(self, C_backbone, valid_mask):
 
 		# prep and start from white noise latents
-		Z, N = coords_bb.shape[:2]
+		Z, N = valid_mask.shape
 		latent = torch.randn([Z, N, self.d_latent], device=coords_bb.device)
-
-		# get nbrs and edges
-		edges, nbrs, nbr_mask = self.denoiser.get_constants(coords_bb, valid_mask)
+		edges, nbrs, nbr_mask = self.denoiser.get_constants(C_backbone, valid_mask)
 
 		# initialize t
 		t = torch.tensor([self.noise_scheduler.t_max-1], device=coords_bb.device)
@@ -71,14 +68,23 @@ class Diffusion(nn.Module):
 
 		return latent
 
-	def nudge(self, latent, v_pred, t): # need to adjust this if i choose to go with v pred
+	def nudge(self, latent, v_pred, t): 
+		'''
+		uses DDIM
+		'''
 
 		abars = self.noise_scheduler.get_abars(t).view(-1, 1, 1)
-		betas = self.noise_scheduler.get_betas(t).view(-1, 1, 1)
+		alphas = abars**0.5
+		sigmas = (1-abars)**0.5
 
-		noise_pred = (abars**0.5)*v_pred + ((1 - abars)**0.5)*latent
+		x0 = (alphas*latent - sigmas*v_pred) /  (alphas**2 + sigmas**2)
+		eps_t = (sigmas*latent + alphas*v_pred) /  (alphas**2 + sigmas**2)
 
-		latent_tminus1 = (abars**-0.5)*(latent - betas*((1-abars)**-0.5)*noise_pred) + (betas**0.5)*torch.randn_like(latent)
+		abars_tminus1 = self.noise_scheduler.get_abars(t-1).view(-1, 1, 1)
+		alphas_tminus1 = abars_tminus1**0.5
+		sigmas_tminus1 = (1-abars_tminus1)**0.5
+
+		latent_tminus1 = alphas_tminus1*x0 + sigmas_tminus1*eps_t
 
 		return latent_tminus1
 

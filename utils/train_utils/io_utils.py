@@ -60,6 +60,14 @@ class Output():
 		
 		model hyper-parameters:
 
+			d_model: {hyper_parameters.d_model}  
+			d_latent: {hyper_parameters.d_latent} 
+			top_k: {hyper_parameters.top_k}  
+			voxel_dims: {hyper_parameters.voxel_dims}
+			cell_dim: {hyper_parameters.cell_dim} 
+			vae_layers: {hyper_parameters.vae_layers}
+			diff_layers: {hyper_parameters.diff_layers}
+
 		data:
   			data_path: {data.data_path}
 			dataset split ({data.num_train + data.num_val + data.num_test:,} clusters total): 
@@ -75,6 +83,7 @@ class Output():
 		training-parameters:
 			epochs: {training_parameters.epochs}
 			rng: {training_parameters.rng}
+			use autocast: {training_parameters.use_amp}
 			checkpoint:
 				checkpoint_path: {training_parameters.checkpoint.path}
 			inference:
