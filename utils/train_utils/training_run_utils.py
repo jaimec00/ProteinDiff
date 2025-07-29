@@ -16,10 +16,10 @@ class Epoch():
 
 	def training(self):
 		if self.train_type=="vae":
-			# self.training_run_parent.model.module.vae.train()
-			self.training_run_parent.model.module.classifier.train()
+			self.training_run_parent.model.vae.train()
+			self.training_run_parent.model.classifier.train()
 		elif self.train_type=="diffusion":
-			self.training_run_parent.model.module.diffusion.train()
+			self.training_run_parent.model.diffusion.train()
 
 	def epoch_loop(self):
 		'''
@@ -30,15 +30,13 @@ class Epoch():
 		self.training()
 
 		# setup the epoch
-		if self.training_run_parent.rank==0:
-			self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.step, self.training_run_parent.scheduler.get_last_lr()[0])
+		self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.scheduler.last_epoch, self.training_run_parent.scheduler.get_last_lr()[0])
 
 		# clear temp losses
 		self.training_run_parent.losses.clear_tmp_losses()
 
 		# init epoch pbar
-		if self.training_run_parent.rank==0:
-			epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="Training Progress", unit="step")
+		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="Training Progress", unit="step")
 
 		# loop through batches
 		for b_idx, data_batch in enumerate(self.training_run_parent.data.train_data):
@@ -50,8 +48,7 @@ class Epoch():
 			batch.batch_learn()
 
 			# update pbar
-			if self.training_run_parent.rank==0:
-				epoch_pbar.update(self.training_run_parent.world_size)
+			epoch_pbar.update(1)
 		
 		# log epoch losses and save avg
 		self.training_run_parent.output.log_epoch_losses(self.training_run_parent.losses)
@@ -61,8 +58,7 @@ class Epoch():
 
 		# switch representative cluster samples
 		if self.epoch < (self.epochs - 1):
-			if self.training_run_parent.rank==0:
-				self.training_run_parent.output.log.info("Loading Next Epoch's Training Data...")
+			self.training_run_parent.output.log.info("Loading Next Epoch's Training Data...")
 			self.training_run_parent.data.train_data.rotate_data()
 			self.training_run_parent.data.val_data.rotate_data()
 
@@ -86,8 +82,6 @@ class Batch():
 		self.inference = inference
 		self.temp = temp
 		self.train_type = epoch.train_type
-		self.world_size = epoch.training_run_parent.world_size
-		self.rank = epoch.training_run_parent.rank
 		self.scaler =epoch.training_run_parent.scaler 
 
 	def move_to(self, device):
@@ -121,7 +115,7 @@ class Batch():
 		self.move_to(self.epoch_parent.training_run_parent.gpu)
 
 		# utils
-		model = self.epoch_parent.training_run_parent.model.module	
+		model = self.epoch_parent.training_run_parent.model	
 		loss_function = self.epoch_parent.training_run_parent.losses.loss_function
 
 		# for vae training
@@ -142,7 +136,6 @@ class Batch():
 			# inference only applicable after train diffusion
 			if self.inference:
 
-				# divergence in fp32, the rest is autocast
 				if self.scaler is None:
 					seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="inference")
 				else:
@@ -155,13 +148,13 @@ class Batch():
 			else:
 
 				if self.scaler is None:
-					velocity_pred, velocity = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
+					pred, trgt = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
 				else:
 					with torch.autocast("cuda"):
-						velocity_pred, velocity = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
+						pred, trgt = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
 
 				# compute loss
-				losses = loss_function.diff(velocity_pred, velocity, self.loss_mask)
+				losses = loss_function.diff(pred, trgt, self.loss_mask)
 
 		# add the losses to the temporary losses
 		self.epoch_parent.training_run_parent.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())
@@ -174,8 +167,7 @@ class Batch():
 		scheduler = self.epoch_parent.training_run_parent.scheduler
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
 
-		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
-		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
+		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() 
 
 		# perform backward pass to accum grads
 		if self.scaler is None:
@@ -188,21 +180,19 @@ class Batch():
 			if self.scaler is None:
 				# grad clip
 				if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
-					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.module.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
+					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
 				# step
 				optim.step()
 			else:
 				if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
 					self.scaler.unscale_(optim) # scaler sees that grads already unscaled when call step, no issue
-					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.module.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
+					torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
 
 				self.scaler.step(optim)
 				self.scaler.update()
 
 			scheduler.step()
 			optim.zero_grad()
-
-			self.epoch_parent.training_run_parent.step += 1
 
 	def noise_coords(self):
 

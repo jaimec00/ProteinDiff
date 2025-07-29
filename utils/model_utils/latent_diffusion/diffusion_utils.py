@@ -8,9 +8,9 @@ class NodeDenoiser(nn.Module):
 	def __init__(self, d_model=128, top_k=32, layers=3, min_rbf=2.0, max_rbf=22.0, num_rbf=16):
 		super().__init__()
 
-		self.edge_norm = nn.LayerNorm(num_rbf*4*4)
-		self.edge_proj = nn.Linear(num_rbf*4*4, d_model)
-		cluster_size = 8
+		self.rbf_norm = nn.LayerNorm(num_rbf*4*4)
+		self.edge_proj = nn.Linear(num_rbf*4*4 + 9, d_model)
+		cluster_size = 6
 		self.encs = nn.ModuleList([DiTCluster(d_model, heads=4, cluster_size=min(layers, cluster_size*(i+1)) - cluster_size*i) for i in range(0,layers,cluster_size)])
 		self.top_k = top_k
 		self.register_buffer("rbf_centers", torch.linspace(min_rbf, max_rbf, num_rbf))
@@ -19,14 +19,15 @@ class NodeDenoiser(nn.Module):
 	def forward(self, nodes, t, edges, nbrs, nbr_mask):
 
 		for enc in self.encs:
-			nodes = torch.utils.checkpoint.checkpoint(enc, nodes, edges, nbrs, t, nbr_mask, use_reentrant=False)
+			# nodes = torch.utils.checkpoint.checkpoint(enc, nodes, edges, nbrs, t, nbr_mask, use_reentrant=False)
+			nodes = enc(nodes, edges, nbrs, t, nbr_mask)
 
 		return nodes
 
-	def get_constants(self, C_backbone, valid_mask):
+	def get_constants(self, C_backbone, frames, valid_mask):
 
 		nbrs, nbr_mask = self.get_neighbors(C_backbone, valid_mask)
-		edges = self.get_edges(C_backbone, nbrs)
+		edges = self.get_edges(C_backbone, frames, nbrs)
 
 		return edges, nbrs, nbr_mask
 
@@ -51,7 +52,7 @@ class NodeDenoiser(nn.Module):
 
 		return nbrs, nbr_mask
 
-	def get_edges(self, C_backbone, nbrs):
+	def get_edges(self, C_backbone, frames, nbrs):
 
 		Z, N, A, S = C_backbone.shape
 		_, _, K = nbrs.shape
@@ -64,13 +65,19 @@ class NodeDenoiser(nn.Module):
 
 		rbf = torch.exp(-rbf_numerator / (self.spread**2)).reshape(Z,N,K,-1)
 
-		edges = self.edge_proj(self.edge_norm(rbf))
+		# testing if including the relative frames helps
+		frame_nbrs = torch.gather(frames.unsqueeze(2).expand(Z, N, K, 3, 3), 1, nbrs.reshape(Z, N, K, 1, 1).expand(Z, N, K, 3, 3))
+		relative_frames = torch.matmul(frames.unsqueeze(2).transpose(-2,-1), frame_nbrs).reshape(Z, N, K, -1)
+
+		edges = torch.cat([self.rbf_norm(rbf), relative_frames], dim=3) # Z,N,K,256+9=265
+
+		edges = self.edge_proj(edges)
 
 		return edges
 
 class DiTCluster(nn.Module):
 	'''
-	meant to group DiT layers so that checkpoint only saves layers//clustersize inputs for recomputation
+	meant to group DiT layers so that checkpoint only saves layers//clustersize inputs for recomputation in bwd pass
 	'''
 	def __init__(self, d_model=256, heads=4, cluster_size=4):
 		super().__init__()
@@ -213,8 +220,8 @@ class StaticLayerNorm(nn.Module):
 	def forward(self, x):
 		centered = x - x.mean(dim=-1, keepdim=True) 
 		std = centered.std(dim=-1, keepdim=True)
-		std = std.masked_fill(std==0, 1)
-		return centered / std
+		normed = centered / std.masked_fill(std==0, 1)
+		return normed
 
 class CosineScheduler(nn.Module):
 	def __init__(self, t_max, s=0.008):

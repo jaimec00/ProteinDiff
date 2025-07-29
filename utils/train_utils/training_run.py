@@ -10,9 +10,6 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 import torch.optim.lr_scheduler as lr_scheduler
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from tqdm import tqdm
 import os
@@ -49,24 +46,7 @@ class TrainingRun():
 
 	def __init__(self, args):
 
-		world_size = torch.cuda.device_count()
-		os.environ['MASTER_ADDR'] = '127.0.0.1'
-		os.environ['MASTER_PORT'] = str(args.port)
-		mp.spawn(self.start_training, args=(world_size, args), nprocs=world_size, join=True)
-
-	def start_training(self, local_rank, world_size, args):
-	
-		dist.init_process_group(
-			backend='nccl',
-			init_method='env://',
-			world_size=world_size,
-			rank=local_rank
-		)
-
-		torch.cuda.set_device(local_rank)
-		self.rank = int(local_rank)
-		self.world_size = int(world_size)
-		self.gpu = torch.device(f'cuda:{local_rank}')
+		self.gpu = torch.device(f'cuda')
 		self.cpu = torch.device("cpu")
 		self.debug = args.debug_grad
 
@@ -91,7 +71,6 @@ class TrainingRun():
 
 		self.hyper_parameters = args.hyper_parameters
 		self.training_parameters = args.training_parameters
-		self.step = 0 # log the step number
 		
 		self.data = DataHolder(	args.data.data_path, # single chain or multichain
 								args.data.num_train, args.data.num_val, args.data.num_test, 
@@ -99,8 +78,7 @@ class TrainingRun():
 								args.data.min_seq_size, args.data.max_seq_size, 
 								args.data.max_resolution,
 								args.training_parameters.regularization.homo_thresh, 
-								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae and classifier are dont have residues communicate, no need for copies
-								rank=self.rank, world_size=self.world_size, rng=self.training_parameters.rng
+								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae and classifier dont have residues communicate, no need for copies
 							)
 		
 		self.losses = TrainingRunLosses(	args.training_parameters.train_type,
@@ -108,7 +86,7 @@ class TrainingRun():
 											args.training_parameters.loss.beta,
 										)
 
-		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints, rank=self.rank, world_size=self.world_size)
+		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints)
 
 		self.checkpoint = torch.load(self.training_parameters.checkpoint.path, weights_only=True, map_location=self.gpu) if self.training_parameters.checkpoint.path else ""
 
@@ -143,30 +121,29 @@ class TrainingRun():
 									cell_dim=self.hyper_parameters.cell_dim,
 									vae_layers=self.hyper_parameters.vae_layers,
 									diff_layers=self.hyper_parameters.diff_layers,
+									diff_parameterization=self.hyper_parameters.diff_parameterization,
 									class_layers=self.hyper_parameters.class_layers
 								)
 		# parallelize the model
 		self.model.to(self.gpu)
 
-		self.model = DDP(self.model, device_ids=[self.rank])
-
 		# load any checkpoints
 		if self.checkpoint:
 			state_dicts = self.checkpoint["model"]
 			if self.training_parameters.checkpoint.vae:
-				self.model.module.vae.load_state_dict(state_dicts["vae"])
-				self.model.module.classifier.load_state_dict(state_dicts["classifier"])
+				self.model.vae.load_state_dict(state_dicts["vae"])
+				self.model.classifier.load_state_dict(state_dicts["classifier"])
 			if self.training_parameters.checkpoint.diff:
-				self.model.module.diffusion.load_state_dict(state_dicts["diffusion"])
+				self.model.diffusion.load_state_dict(state_dicts["diffusion"])
 
-		self.model.module.eval()
+		self.model.eval()
 		if self.training_parameters.train_type=="diffusion": # freeze vae if in diffusion
-			for param in self.model.module.vae.parameters():
+			for param in self.model.vae.parameters():
 				param.requires_grad = False
 
 
 		# get number of parameters for logging
-		self.training_parameters.num_params = sum(p.numel() for p in self.model.module.parameters())
+		self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
 
 		# print gradients at each step if in debugging mode
 		if self.debug: # havent tested with DDP, but might interfere with DDP hooks for grad reduce, will check later, prob not until i need to debug grads lol
@@ -197,7 +174,7 @@ class TrainingRun():
 										eps=float(self.training_parameters.adam.epsilon), weight_decay=self.training_parameters.adam.weight_decay)
 		self.optim.zero_grad()
 		if self.checkpoint and self.training_parameters.checkpoint.adam:
-			self.optim.load_state_dict(self.checkpoint["adam"], weights_only=True, map_location=self.gpu)
+			self.optim.load_state_dict(self.checkpoint["adam"])
 
 	def setup_scheduler(self):
 		'''
@@ -331,9 +308,7 @@ class TrainingRun():
 				# run the model
 				batch.batch_forward()
 
-				# update pbar
-				if self.rank == 0:
-					val_pbar.update(self.world_size)
+				val_pbar.update(1)
 
 			# add the avg losses to the global loss and log
 			self.output.log_val_losses(self.losses)
@@ -375,8 +350,7 @@ class TrainingRun():
 				batch.batch_forward()
 
 				# update pbar
-				if self.rank == 0:
-					test_pbar.update(self.world_size)
+				test_pbar.update(1)
 		
 		# log the losses
 		self.output.log_test_losses(self.losses)
@@ -385,5 +359,4 @@ class TrainingRun():
 		if fancy:
 			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
 
-		if self.rank==0:
-			self.output.log.info(message)
+		self.output.log.info(message)

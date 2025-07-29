@@ -43,7 +43,7 @@ class PreProcesser(nn.Module):
 			# compute divergence of the normed fields, hoping this is easier for diffusion
 			divergence = self.compute_divergence(fields)
 
-		return C_backbone, divergence
+		return C_backbone, divergence, local_frames
 
 	def get_backbone(self, C):
 
@@ -87,10 +87,10 @@ class PreProcesser(nn.Module):
 		Vx, Vy, Vz, _ = self.voxel.shape
 
 		# rotate the voxel grid using the local frames, each unit vector (Uxyz) is multipled by the corresponding component and summed across U dim
-		rotation = torch.sum(frames.view(Z,N,1,1,1,U,S) * self.voxel.view(1,1,Vx,Vy,Vz,S,1), dim=5) # Z,N,Vx,Vy,Vz,U
+		rotation = torch.sum(frames.view(Z,N,1,1,1,U,S) * self.voxel.reshape(1,1,Vx,Vy,Vz,S,1), dim=5) # Z,N,Vx,Vy,Vz,U
 
 		# add the offset so the origin is the beta carbon
-		local_voxels = origins.view(Z,N,1,1,1,S) + rotation # Z,N,Vx,Vy,Vz,S
+		local_voxels = origins.reshape(Z,N,1,1,1,S) + rotation # Z,N,Vx,Vy,Vz,S
 
 		return local_voxels
 		
@@ -107,7 +107,7 @@ class PreProcesser(nn.Module):
 		# compute the electric field, using just basic point charge formula
 
 		# now get distance vectors, as directionality is also used. points from atoms TO voxel cells
-		dist_vectors =  voxels.view(Z, N, Vx, Vy, Vz, 1, S) - C.view(Z, N, 1, 1, 1, A, S) # Z,N,Vx,Vy,Vz,A,S 
+		dist_vectors =  voxels.reshape(Z, N, Vx, Vy, Vz, 1, S) - C.reshape(Z, N, 1, 1, 1, A, S) # Z,N,Vx,Vy,Vz,A,S 
 
 		# compute magnitudes
 		dists = torch.linalg.vector_norm(dist_vectors, dim=-1, keepdim=True) # Z,N,Vx,Vy,Vz,A,1
@@ -116,11 +116,11 @@ class PreProcesser(nn.Module):
 		dist_term = dist_vectors / (dists.masked_fill(dists==0,1)*(dists.clamp(min=self.res)**2)) # Z,N,Vx,Vy,Vz,A,S
 
 		# get partial charges, zero out masked atoms
-		partial_charges = torch.gather(self.amber_partial_charges.view(1,1,AA,A).expand(Z,N,AA,A), 2, L.view(Z,N,1,1).expand(Z,N,1,A)).squeeze(2) * atom_mask # Z, N, A
+		partial_charges = torch.gather(self.amber_partial_charges.reshape(1,1,AA,A).expand(Z,N,AA,A), 2, L.reshape(Z,N,1,1).expand(Z,N,1,A)).squeeze(2) * atom_mask # Z, N, A
 
 		# now compute the final field, sum over atoms. 
 		# no coulomb constant, since scaling to unit vector anyways
-		fields = torch.sum(partial_charges.view(Z, N, 1, 1, 1, A, 1) * dist_term.view(Z, N, Vx, Vy, Vz, A, S), dim=5) # Z,N,Vx,Vy,Vz,S
+		fields = torch.sum(partial_charges.reshape(Z, N, 1, 1, 1, A, 1) * dist_term.reshape(Z, N, Vx, Vy, Vz, A, S), dim=5) # Z,N,Vx,Vy,Vz,S
 
 		# decidied to norm to unit vectors, thus the models job is to nudge them towards the true direction
 		# also works well with latent diffusion, as the compression makes sense, since there is redundancy due to continuous nature

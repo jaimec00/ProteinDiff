@@ -19,7 +19,7 @@ import numpy as np
 
 class Output():
 
-	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):
+	def __init__(self, out_path, model_checkpoints=10):
 
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
@@ -28,12 +28,10 @@ class Output():
 
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
-		self.rank = rank 
-		self.world_size = world_size
 
 	def setup_logging(self, log_file):
 
-		logger = logging.getLogger("proteusAI_log")
+		logger = logging.getLogger("ProteinDiff_log")
 		logger.setLevel(logging.DEBUG)
 
 		formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -82,7 +80,6 @@ class Output():
 
 		training-parameters:
 			epochs: {training_parameters.epochs}
-			rng: {training_parameters.rng}
 			use autocast: {training_parameters.use_amp}
 			checkpoint:
 				checkpoint_path: {training_parameters.checkpoint.path}
@@ -113,43 +110,21 @@ class Output():
 		output directory: {self.out_path}
 		''')
 
-		if self.rank==0:
-			self.log.info(log)
+		self.log.info(log)
 
 	def log_epoch(self, epoch, step, current_lr):
 
-		if self.rank==0:
-			self.log.info(textwrap.dedent(f'''
+		self.log.info(textwrap.dedent(f'''
+		
+			{'-'*80}
+			Epoch {epoch}, Step {step:,}: 
+			{'-'*80}
 			
-				{'-'*80}
-				Epoch {epoch}, Step {step:,}: 
-				{'-'*80}
-				
-				Current Learning Rate: {current_lr}
-			''')
-			)
-
-	def log_losses(self, losses, mode):
-
-		# workers pickle their loss objects, send to master, master extends the loss
-		if self.rank == 0:
-			loss_list = [None for _ in range(self.world_size)]
-		else:
-			loss_list = None
-
-
-		torch.distributed.gather_object(
-			obj=losses.tmp,
-			object_gather_list=loss_list,
-			dst=0,
-			group=None
+			Current Learning Rate: {current_lr}
+		''')
 		)
 
-		if self.rank!=0: 
-			return # workers are done after gather
-
-		for worker_loss in loss_list[1:]: # exclude the master loss object, as that is what we are extending
-			losses.tmp.extend_losses(worker_loss) 
+	def log_losses(self, losses, mode):
 
 		losses_dict = losses.tmp.get_avg()
 		for loss_type, loss in losses_dict.items():
@@ -200,9 +175,9 @@ class Output():
 
 	def save_checkpoint(self, model, adam=None, scheduler=None, appended_str=""):
 
-		checkpoint = {	"model": {	"vae": model.module.vae.state_dict(), 
-									"diffusion": model.module.diffusion.state_dict(), 
-									"classifier": model.module.classifier.state_dict(),
+		checkpoint = {	"model": {	"vae": model.vae.state_dict(), 
+									"diffusion": model.diffusion.state_dict(), 
+									"classifier": model.classifier.state_dict(),
 						},
 						"adam": (None if adam is None else adam.state_dict()), 
 						"scheduler": (None if scheduler is None else scheduler.state_dict())

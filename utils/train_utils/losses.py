@@ -121,9 +121,9 @@ class LossFunction():
 
 		return kl_div.sum()
 
-	def mse(self, pred, true, mask):
+	def mse(self, pred, trgt, mask):
 		Z, N, S, Vx, Vy, Vz = pred.shape
-		squared_err = ((pred - true)**2) * mask.view(Z,N,1,1,1,1)
+		squared_err = ((pred - trgt)**2) * mask.view(Z,N,1,1,1,1)
 		mse = squared_err.sum() / (S*Vx*Vy*Vz)
 		return mse
 
@@ -181,8 +181,8 @@ class LossFunction():
 		return losses
 
 
-	def diff(self, noise_pred, noise_true, mask):
-		mse = self.mse(noise_pred, noise_true, mask)
+	def diff(self, pred, trgt, mask):
+		mse = self.mse(pred, trgt, mask)
 		losses = {"Mean Squared Error": mse}
 
 		return losses
