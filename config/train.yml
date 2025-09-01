@@ -17,14 +17,14 @@ debug_grad: False
 # hyperparameters
 hyper_parameters:
   d_model: 256
-  d_diffusion: 256
+  d_diffusion: 512
   d_latent: 16
   top_k: 32
   voxel_dims: 8
   cell_dim: 1.0
   vae_layers: 1
   diff_layers: 12
-  diff_parameterization: "eps" # eps, x0, or vpred
+  diff_parameterization: "x0" # eps, x0, or vpred
   class_layers: 1
 
 # ------------------------------------------------------------------------------
@@ -82,7 +82,7 @@ data:
 
 # Output
 output:
-  out_path: "/work/hcardenas1/projects/ProteinDiff/models/diffusion_eps/test1"
+  out_path: "/work/hcardenas1/projects/ProteinDiff/models/diffusion_x0/test2d512"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

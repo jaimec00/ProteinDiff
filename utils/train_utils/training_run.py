@@ -217,8 +217,7 @@ class TrainingRun():
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
-			if self.rank==0:
-				self.output.save_checkpoint(self.model, adam=self.optim, scheduler=self.scheduler, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
+			self.output.save_checkpoint(self.model, adam=self.optim, scheduler=self.scheduler, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
 
 	def training_converged(self, epoch_idx):
 
@@ -293,8 +292,7 @@ class TrainingRun():
 		dummy_epoch = Epoch(self)
 
 		# progress bar
-		if self.rank == 0:
-			val_pbar = tqdm(total=len(self.data.val_data), desc="Validation Progress", unit="Step")
+		val_pbar = tqdm(total=len(self.data.val_data), desc="Validation Progress", unit="Step")
 				
 		# turn off gradient calculation
 		with torch.no_grad():
@@ -331,8 +329,7 @@ class TrainingRun():
 		dummy_epoch = Epoch(self)
 
 		# progress bar
-		if self.rank == 0:
-			test_pbar = tqdm(total=len(self.data.test_data), desc="Test Progress", unit="Step")
+		test_pbar = tqdm(total=len(self.data.test_data), desc="Test Progress", unit="Step")
 
 		# turn off gradient calculation
 		with torch.no_grad():

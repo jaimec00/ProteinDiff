@@ -121,10 +121,9 @@ class EpochBioUnits():
 				if result is not None:  # Ignore failed results
 					self.batches.extend(result)
 
-		print(self.batches)
 
 	def __len__(self):
-		return sum(len(batch) for batch in self.batches)
+		return len(self.batches)
 
 	def __getitem__(self, idx):
 		return self.biounits[idx]
@@ -166,7 +165,7 @@ class BioUnit():
 		self.coords = coords.masked_fill(coords.isnan(), 0.0)
 		self.labels = biounit_dict["labels"] 
 		self.atom_mask = biounit_dict["atom_mask"]
-		self.chain_idxs = biounit_dict["chain_idxs"] # dict of chain [start, end)
+		self.chain_idxs = biounit_dict["chain_idxs"]	
 		self.seq_sims = biounit_dict["seq_sims"] # dict of dicts, indicating seq sim of each chain to all others, outer dicts contains each chain as values, inner dict is value of outer, with keys of inner dict being all other chains, and values being the seq sims
 		self.size = self.labels.size(0)
 		
@@ -174,7 +173,6 @@ class BioUnit():
 			self.asmb_xforms = [torch.eye(4).unsqueeze(0)]
 		else:
 			self.asmb_xforms = [xform for xform in biounit_dict["asmb_xforms"] if xform.size(0)*self.size <= max_seq_size] # transforms to get biological assembly. list of tensors. first dim of each tensor is the number of copies
-
 
 	def sample_asmb(self):
 		xform = random.sample(self.asmb_xforms, 1)[0] # N x 4 x 4
@@ -186,7 +184,7 @@ class BioUnit():
 		coords = (torch.einsum("bij,raj->brai", R, self.coords) + T.view(num_copies, 1,1,3)).reshape(N*num_copies, A, S)
 
 		# adjust sizes based on the number of copies made
-		chain_idxs = {chain: [[idxs[0] + self.size*i, idxs[1] + self.size*i] for i in range(num_copies)] for chain, idxs in self.chain_idxs.items()}
+		chain_idxs = {chain: [[start+self.size*i, stop+self.size*i] for i in range(num_copies)] for chain, (start, stop) in self.chain_idxs.items()}
 		labels = self.labels.repeat(num_copies)
 		atom_mask = self.atom_mask.repeat([num_copies, 1])
 
@@ -204,14 +202,16 @@ class DataBatch():
 		# initialize a list of sample for each
 		labels = [epoch_biounits[idx].labels for idx, _ in batch]
 		coords = [epoch_biounits[idx].coords for idx, _ in batch]
+		seq_pos = [self.get_seq_pos(epoch_biounits[idx].chain_idxs) for idx, _ in batch]
 		atom_masks = [epoch_biounits[idx].atom_mask for idx, _ in batch]
-		chain_masks = [self.get_chain_mask(epoch_biounits, idx, homo_thresh, device) for idx, _ in batch]
+		chain_masks = [self.get_chain_mask(epoch_biounits[idx], epoch_biounits.chains[idx], homo_thresh, device) for idx, _ in batch]
 
 		# pad in seq sim
 		seq_size = max(label.size(0) for label in labels)
 		self.labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
 		self.coords = self.pad_and_batch(coords, pad_val="zero", max_size=seq_size)
-		self.chain_idxs = [[chain_copy for chain in epoch_biounits[idx].chain_idxs.values() for chain_copy in chain] for idx, _ in batch] # no padding for chain idxs
+		self.seq_pos = self.pad_and_batch(seq_pos, pad_val="zero", max_size=seq_size)
+		self.chain_pos = torch.cumsum(self.seq_pos==0, dim=1) # every 0 is the start of the chain, only increases on next 0 in the sequence
 
 		# compute/pad masks
 		self.pad_mask = torch.tensor([size for _, size in batch], device=device).view(-1,1) < torch.arange(seq_size).view(1,-1)
@@ -221,16 +221,20 @@ class DataBatch():
 		self.canonical_seq_mask = self.labels!=aa_2_lbl("X")
 		self.coords_mask = self.atom_mask[:, :, :3].all(dim=2) # if n, ca, or c are missing, consider the coordinates missing
 
-	def get_chain_mask(self, epoch_biounits, idx, homo_thresh, device):
+	def get_seq_pos(self, chain_dict):
+		seq_idxs = torch.cat([torch.arange(stop-start) for ranges in chain_dict.values() for start, stop in ranges])
+		return seq_idxs
+
+	def get_chain_mask(self, biounit, chain, homo_thresh, device):
 
 		# init the chain_mask
-		chain_mask = torch.zeros(epoch_biounits[idx].labels.shape, dtype=torch.bool, device=device)
+		chain_mask = torch.zeros(biounit.labels.shape, dtype=torch.bool, device=device)
 
 		# get seq sims between chains to determine homo
-		seq_sims = epoch_biounits[idx].seq_sims[epoch_biounits.chains[idx]]
-		homo_chains = [chain for chain, seq_sim in seq_sims.items() if seq_sim > homo_thresh] # list of chain identifiers whose tm score is greater than the threshold compared to the representative chain
-		homo_idxs = [epoch_biounits[idx].chain_idxs[chain] for chain in homo_chains]
-		self_idxs = [epoch_biounits[idx].chain_idxs[epoch_biounits.chains[idx]]]
+		seq_sims = biounit.seq_sims[chain]
+		homo_chains = [c for c, seq_sim in seq_sims.items() if seq_sim > homo_thresh] # list of chain identifiers whose tm score is greater than the threshold compared to the representative chain
+		homo_idxs = [biounit.chain_idxs[c] for c in homo_chains]
+		self_idxs = [biounit.chain_idxs[chain]]
 		
 		# loop through homo chains and self chains, since single chain biounits might not have seq sims
 		for chain_copies in homo_idxs + self_idxs:

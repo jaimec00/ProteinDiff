@@ -70,6 +70,8 @@ class Batch():
 		# data
 		self.coords = data_batch.coords 
 		self.labels = data_batch.labels
+		self.seq_pos = data_batch.seq_pos
+		self.chain_pos = data_batch.chain_pos
 
 		# define masks
 		self.atom_mask = data_batch.atom_mask
@@ -121,11 +123,7 @@ class Batch():
 		# for vae training
 		if self.train_type=="vae":
 			
-			if self.scaler is None:
-				latent_mu, latent_logvar, divergence_pred, divergence, seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="vae")
-			else:
-				with torch.autocast("cuda"):
-					latent_mu, latent_logvar, divergence_pred, divergence, seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="vae")
+			latent_mu, latent_logvar, divergence_pred, divergence, seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="vae")
 				
 			# compute loss
 			losses = loss_function.vae(latent_mu, latent_logvar, divergence_pred, divergence, seq_pred, self.labels, self.loss_mask)
@@ -136,23 +134,15 @@ class Batch():
 			# inference only applicable after train diffusion
 			if self.inference:
 
-				if self.scaler is None:
-					seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="inference")
-				else:
-					with torch.autocast("cuda"):
-						seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="inference")
-
+				seq_pred = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="inference")
+				
 				# compute loss
 				losses = loss_function.inference(seq_pred, self.labels, self.loss_mask)
 			
 			else:
 
-				if self.scaler is None:
-					pred, trgt = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
-				else:
-					with torch.autocast("cuda"):
-						pred, trgt = model(self.coords, self.labels, self.atom_mask, self.valid_mask, run_type="diffusion")
-
+				pred, trgt = model(self.coords, self.labels, self.seq_pos, self.chain_pos, self.atom_mask, self.valid_mask, run_type="diffusion")
+				
 				# compute loss
 				losses = loss_function.diff(pred, trgt, self.loss_mask)
 

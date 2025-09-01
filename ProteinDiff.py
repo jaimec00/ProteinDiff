@@ -27,6 +27,8 @@ class ProteinDiff(nn.Module):
 		self.diffusion = Diffusion(d_model=d_diffusion, d_latent=d_latent, top_k=top_k, layers=diff_layers, parameterization=diff_parameterization, t_max=1000, min_rbf=min_rbf, max_rbf=max_rbf, num_rbf=num_rbf)
 		self.classifier = Classifier(voxel_dim=voxel_dims, d_model=d_model, resnet_layers=class_layers)
 
+		self.diffusion_preprocesser = None
+
 	def forward(self, C, L, atom_mask=None, valid_mask=None, run_type="inference", temp=1e-6):
 		'''
 		'''
@@ -46,11 +48,12 @@ class ProteinDiff(nn.Module):
 			return latent_mu, latent_logvar, decoded_voxels, voxels, seq
 
 		if run_type=="diffusion":
-			with torch.no_grad():
-				C_backbone, voxels, frames = self.prep(C, L, atom_mask, valid_mask)
-				latent, _, _ = self.vae.enc(voxels)
-				t = self.diffusion.get_rand_t_for(latent)
-				latent_noised, trgt = self.diffusion.noise(latent, t)
+			
+			C_backbone, voxels, frames = self.prep(C, L, atom_mask, valid_mask)
+			latent, _, _ = self.vae.enc(voxels)
+			t = self.diffusion.get_rand_t_for(latent)
+			latent_noised, trgt = self.diffusion.noise(latent, t)
 			pred = self.diffusion(latent_noised, t, C_backbone, frames, valid_mask)
 
 			return pred, trgt
+

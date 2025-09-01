@@ -8,26 +8,63 @@ class NodeDenoiser(nn.Module):
 	def __init__(self, d_model=128, top_k=32, layers=3, min_rbf=2.0, max_rbf=22.0, num_rbf=16):
 		super().__init__()
 
-		self.rbf_norm = nn.LayerNorm(num_rbf*4*4)
-		self.edge_proj = nn.Linear(num_rbf*4*4 + 9, d_model)
-		cluster_size = 6
-		self.encs = nn.ModuleList([DiTCluster(d_model, heads=4, cluster_size=min(layers, cluster_size*(i+1)) - cluster_size*i) for i in range(0,layers,cluster_size)])
+		# nbrs
 		self.top_k = top_k
+
+		# rbf stuff (rbfs w/ linearly spaced centers of inter-residue backbone atom pairs)
 		self.register_buffer("rbf_centers", torch.linspace(min_rbf, max_rbf, num_rbf))
 		self.spread = (max_rbf - min_rbf) / num_rbf
+		self.rbf_norm = nn.LayerNorm(num_rbf*4*4)
+		self.rbf_proj = nn.Linear(num_rbf*4*4, d_model)
+
+		# relative frames (flattened 3x3 to 9)
+		self.frame_proj = nn.Linear(9, d_model)
+
+		# relative seq pos (relative difference in sequence)
+		self.seq_emb = nn.Embedding(66, d_model) # [-32,33] 33 is diff chains, 0 is self
+
+		# combine the rbf, frames, and seq emb into a single edge embedding
+		self.edge_mlp = MLP(d_in=d_model*3, d_out=d_model, d_hidden=d_model, hidden_layers=2, ac="silu")
+
+		# will cat the node, edge, and t embeddings and pass through mlp so each node only updates its view of its nbrs (including self)
+		self.view_mlp = MLP(d_in=d_model*3, d_out=d_model, d_hidden=d_model, hidden_layers=2, ac="silu")
+
+		# encoder
+		self.encs = nn.ModuleList([DiT(d_model, heads=4) for _ in range(layers)])
 
 	def forward(self, nodes, t, edges, nbrs, nbr_mask):
 
+		# convert ZxNxD to ZxNxKxD, ie each node gets a view of its nearest neighbors, based on edge and t embeddings
+		nodes, t = self.get_views(nodes, edges, t, nbrs)
+
 		for enc in self.encs:
-			# nodes = torch.utils.checkpoint.checkpoint(enc, nodes, edges, nbrs, t, nbr_mask, use_reentrant=False)
-			nodes = enc(nodes, edges, nbrs, t, nbr_mask)
+			# nodes = torch.utils.checkpoint.checkpoint(enc, nodes, t, nbr_mask, use_reentrant=False)
+			nodes = enc(nodes, t, nbr_mask)
+
+		# get the 0th dim (self)
+		nodes = torch.gather(nodes, 2, torch.zeros_like(nodes))
 
 		return nodes
+	
+	def get_views(nodes, edges, t, nbrs):
 
-	def get_constants(self, C_backbone, frames, valid_mask):
+		# gather neighbor nodes
+		nodes = nodes.unsqueeze(2).expand(-1,-1,self.top_k,-1) # Z x N x K x Dv
+		nbrs = nbrs.unsqueeze(3).expand(-1,-1,-1,nodes.size(3)) # Z x N x K x Dv
+		nodes = torch.gather(nodes, 1, nbrs) # Z x N x K x Dv
+		
+		# reshape t to include neighbor dim
+		t = t.unsqueeze(2).expand(-1,-1, self.top_k, -1)
+
+		# combine node, edge and timestep embeddings to get a "personalized" view of nbrs
+		nodes = self.view_mlp(torch.cat([nodes, edges, t], dim=3))
+
+		return nodes, t
+
+	def get_constants(self, C_backbone, frames, seq_idxs, chain_idxs, valid_mask):
 
 		nbrs, nbr_mask = self.get_neighbors(C_backbone, valid_mask)
-		edges = self.get_edges(C_backbone, frames, nbrs)
+		edges = self.get_edges(C_backbone, frames, seq_idxs, chain_idxs, nbrs)
 
 		return edges, nbrs, nbr_mask
 
@@ -52,7 +89,17 @@ class NodeDenoiser(nn.Module):
 
 		return nbrs, nbr_mask
 
-	def get_edges(self, C_backbone, frames, nbrs):
+	def get_edges(self, C_backbone, frames, seq_idxs, chain_idxs, nbrs):
+
+		rel_rbf = self.get_rbfs(C_backbone, nbrs)
+		rel_frames = self.get_relative_frames(frames, nbrs)
+		rel_idxs = self.get_relative_idxs(frames, nbrs)
+
+		edges = self.edge_mlp(torch.cat([rel_rbf, rel_frames, rel_idxs], dim=3)) # Z,N,K,d_model
+
+		return edges
+
+	def get_rbfs(self, C_backbone, nbrs):
 
 		Z, N, A, S = C_backbone.shape
 		_, _, K = nbrs.shape
@@ -64,30 +111,40 @@ class NodeDenoiser(nn.Module):
 		rbf_numerator = (dists.view(Z, N, K, A, A, 1) - self.rbf_centers.view(1,1,1,1,1,-1))**2 # Z,N,K,A,A,S
 
 		rbf = torch.exp(-rbf_numerator / (self.spread**2)).reshape(Z,N,K,-1)
-
-		# testing if including the relative frames helps
-		frame_nbrs = torch.gather(frames.unsqueeze(2).expand(Z, N, K, 3, 3), 1, nbrs.reshape(Z, N, K, 1, 1).expand(Z, N, K, 3, 3))
-		relative_frames = torch.matmul(frames.unsqueeze(2).transpose(-2,-1), frame_nbrs).reshape(Z, N, K, -1)
-
-		edges = torch.cat([self.rbf_norm(rbf), relative_frames], dim=3) # Z,N,K,256+9=265
-
-		edges = self.edge_proj(edges)
-
-		return edges
-
-class DiTCluster(nn.Module):
-	'''
-	meant to group DiT layers so that checkpoint only saves layers//clustersize inputs for recomputation in bwd pass
-	'''
-	def __init__(self, d_model=256, heads=4, cluster_size=4):
-		super().__init__()
 		
-		self.DiTs = nn.ModuleList([DiT(d_model, heads=4) for _ in range(cluster_size)])
+		rbf = self.rbf_proj(self.rbf_norm(rbf))
 
-	def forward(self, nodes, edges, nbrs, t, nbr_mask):
-		for DiT in self.DiTs:
-			nodes = DiT(nodes, edges, nbrs, t, nbr_mask)
-		return nodes
+		return rbf
+
+	def get_frames(self, frames, nbrs):
+
+		Z, N, K = nbrs.shape
+
+		frames = frames.unsqueeze(2).expand(Z, N, K, 3, 3)
+		nbrs = nbrs.reshape(Z, N, K, 1, 1).expand(Z, N, K, 3, 3)
+		
+		frame_nbrs = torch.gather(frames, 1, nbrs)
+		rel_frames = torch.matmul(frames.transpose(-2,-1), frame_nbrs).reshape(Z, N, K, -1)
+
+		return self.frame_proj(rel_frames)
+
+	def get_seq_pos(self, seq_idxs, chain_idxs, nbrs):
+
+		Z, N = seq_idxs.shape
+
+		seq_idxs = seq_idxs.unsqueeze(2).expand(Z, N, K)		
+		seq_nbrs = torch.gather(seq_idxs, 1, nbrs) # Z,N,K
+
+		chain_idxs = chain_idxs.unsqueeze(2).expand(Z, N, K)
+		chain_nbrs = torch.gather(chain_idxs, 1, nbrs) # Z,N,K
+		diff_chain = chain_idxs!=chain_nbrs
+
+		rel_idx = torch.clamp(seq_nbrs - seq_idxs, min=-32, max=32)
+		rel_idx = rel_idx.masked_fill(diff_chain, 33) + 32 # starts at 0
+
+		return self.seq_emb(rel_idx)
+
+
 
 class DiT(nn.Module):
 	def __init__(self, d_model=128, heads=4):
@@ -122,17 +179,6 @@ class DiT(nn.Module):
 
 		return nodes
 
-	def gather_nodes(self, V, K):
-
-		dimZ, dimN, dimDv = V.shape
-		_, _, dimK = K.shape
-
-		# gather neighbor nodes
-		Vi = V.unsqueeze(2).expand(-1,-1,dimK,-1) # Z x N x K x Dv
-		Ki = K.unsqueeze(3).expand(-1,-1,-1,dimDv) # Z x N x K x Dv
-		Vj = torch.gather(Vi, 1, Ki) # Z x N x K x Dv
-
-		return Vi, Vj
 
 class GraphAttention(nn.Module):
 	def __init__(self, d_model=256, heads=4):

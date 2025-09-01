@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_diff_eps
+#SBATCH --job-name=train_diff_x0512
 #SBATCH --partition=gpu
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
@@ -7,8 +7,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=128G
 #SBATCH --time=48:00:00
-#SBATCH --output=runs/train_diff_eps.out
-#SBATCH --error=runs/train_diff_eps.err
+#SBATCH --output=runs/train_diff_x0512.out
+#SBATCH --error=runs/train_diff_x0512.err
 
 source ~/.bash_custom
 conda activate ProteinDiff_env
