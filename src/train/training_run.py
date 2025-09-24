@@ -25,7 +25,7 @@ from utils.train_utils.losses import TrainingRunLosses
 # detect anomolies in training
 torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
 
-class TrainingRun():
+class TrainingRun:
 	'''
 	the main class for training. holds all of the configuration arguments, and organnizes them into hyper-parameters, 
 	training parameters, data, and output objects
@@ -145,18 +145,6 @@ class TrainingRun():
 		# get number of parameters for logging
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
 
-		# print gradients at each step if in debugging mode
-		if self.debug: # havent tested with DDP, but might interfere with DDP hooks for grad reduce, will check later, prob not until i need to debug grads lol
-			def print_grad(name):
-				def hook(grad):
-					print(f"Gradient at {name}: mean={grad.mean().item():.6f}, std={grad.std().item():.6f}, max={grad.abs().max().item():.6f}")
-				return hook
-
-			# Attach hook to all parameters
-			for name, param in self.model.named_parameters():
-				if param.requires_grad:
-					param.register_hook(print_grad(name))
-
 	def setup_optim(self):
 		'''
 		sets up the optimizer, zeros out the gradient
@@ -256,7 +244,7 @@ class TrainingRun():
 
 		# log training info
 		self.log(f"\n\nInitializing training. "\
-					f"Training on approx. {len(self.data.train_data)} batches "\
+					f"Training on approx. {len(self.data.train)} batches "\
 					f"of batch size {self.data.batch_tokens} tokens "\
 					f"for {self.training_parameters.epochs} epochs.\n" 
 				)

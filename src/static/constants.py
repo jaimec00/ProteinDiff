@@ -3,6 +3,7 @@ hold constants that are reused throughout the model here
 '''
 from data.amber.parse_amber_lib import parse_amber_lib
 import torch
+import numpy as np
 
 # dict to convert amino acid three letter codes to one letter
 three_2_one = {
@@ -33,19 +34,43 @@ one_2_three = {one_letter: three_letter for three_letter, one_letter in three_2_
 # model only predicts canonical aas for now, but the input can be non-canonical (to-do)
 canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
 noncanonical_aas = []
-alphabet = canonical_aas + noncanonical_aas + ['X']
+special_chars = ["X", "<mask>"]
+alphabet = canonical_aas + noncanonical_aas + special_chars
+
+aa_2_lbl_dict = {aa: idx for idx, aa in enumerate(alphabet)}
+lbl_2_aa_dict = {idx: aa for aa, idx in aa_2_lbl_dict.items()}
 
 def aa_2_lbl(aa):
-    if aa in alphabet:
-        return alphabet.index(aa)
+    if aa in aa_2_lbl_dict:
+        return aa_2_lbl_dict[aa]
     else:
-        return alphabet.index("X")
+        return aa_2_lbl_dict["X"]
 
 def lbl_2_aa(label): 
     if label==-1:
         return "X"
     else:
-        return alphabet[label]
+        return lbl_2_aa_dict[label]
+
+# 256-entry LUT for byte values -> label, used to vectorize seq to label
+lut = np.full(256, aa_2_lbl("X"), dtype=np.int64) # X is default for unkown characters
+for aa, lbl in aa_2_lbl_dict.items(): # populate the lut array, each index corresponds to a characters encoding, the value is the label
+    byte = aa.encode('ascii')  # will raise if non-ASCII; use .encode('latin1') if needed
+    if len(byte)==1: # skip mult character aa (e.g. <mask>)
+        lut[byte[0]] = lbl
+
+def seq_2_lbls(seq, device):
+    '''
+    converts a string of amino acids (one-letter codes) to a tensor of labels
+    does this in vectorized fashion
+    '''
+
+    byte_idx = np.frombuffer(seq.encode('ascii'), dtype=np.uint8)  # shape [len(s)], each in [0,255]
+
+    # vectorized lookup
+    labels = lut[byte_idx]  # shape [len(s)], dtype int64
+
+    return labels
 
 # now parse the amber partial charges from ff19SB lib file into a dict of {aa3letter: {N: pc, CA: pc, ...}, ...}
 raw_charges = parse_amber_lib()

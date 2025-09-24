@@ -16,7 +16,7 @@ from utils.train_utils.training_run import TrainingRun
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-def main(args):
+def main(args: Box) -> None:
 	'''
 	main script that instantiates TrainingRun object to train and test the model.
 	'''

@@ -10,10 +10,6 @@ config: "config/train.yml"
 
 # ------------------------------------------------------------------------------
 
-debug_grad: False
-
-# ------------------------------------------------------------------------------
-
 # hyperparameters
 hyper_parameters:
   d_model: 256
@@ -72,7 +68,6 @@ data:
   num_train: -1  # number of training samples to use; -1 means all available
   num_val: -1  # number of validation samples to use; -1 means all available
   num_test: -1  # number of test samples to use; -1 means all available
-  max_batch_size: 256  # maximum samples per batch
   min_seq_size: 16 # minimum sequence length, shorter is excluded
   max_seq_size: 8192 # max sequence lengths, longer samples not included
   batch_tokens: 8192 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
