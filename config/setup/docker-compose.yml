@@ -1,0 +1,30 @@
+
+# both use this
+x-common: &common
+  image: proteindiff:dev # make sure to build first
+  gpus: all # or "gpus: 1" for a single GPU
+  working_dir: /ProteinDiff
+  volumes: # mounts
+    - ${PWD}/src:/ProteinDiff/src # source code
+    - ${PWD}/config/train.yml:/ProteinDiff/config/train.yml # training config
+
+    # --------------- EDIT ---------------
+    - ${PWD}/../pdb_2021aug02_sample:/mnt/data:ro # data
+    - ${PWD}/../experiments:/mnt/experiments # training experiments
+    # ------------------------------------
+
+  environment:
+    DATA_DIR: /mnt/data
+    EXP_DIR: /mnt/outputs
+    PYTHONPATH: "/ProteinDiff/src:${PYTHONPATH}"
+
+
+services:
+  debug:
+    <<: *common
+    stdin_open: true   # same as docker run -i
+    tty: true          # same as docker run -t
+    command: /bin/bash -l -i  # default to a shell (you can still override)
+  train:
+    <<: *common
+    command: python src/training/train/train.py --config config/train.yml

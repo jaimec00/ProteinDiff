@@ -7,18 +7,6 @@ channels:
 dependencies:
   - python>=3.9
   - pytorch=2.5.1
-  - pytorch-cuda=12.4
-  - cuda-toolkit=12.4 
-  - cuda-runtime=12.4
-  - cuda-compiler=12.4
-  - cuda-nvcc=12.4      
-  - cuda-nsight=12.4
-  - cuda-version=12.4
-  - cuda-tools=12.4
-  - cuda-command-line-tools=12.4
-  - cuda-libraries-dev=12.4
-  - cuda-libraries-static=12.4
-  - cuda-visual-tools=12.4
   - numpy
   - pandas
   - requests

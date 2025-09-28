@@ -1,35 +1,28 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.6
 
-# Match CUDA version
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 as base
+# setup nvidia env with micromamba
+FROM mambaorg/micromamba:1.5.8 AS mmb
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN --mount=type=cache,target=/var/cache/apt \
-    apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# copy micromamba bin to nvidia env
+COPY --from=mmb /bin/micromamba /usr/local/bin/micromamba
+COPY config/setup/environment.yml /tmp/
 
-# Install micromamba (tiny bootstrap)
-RUN curl -L https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /usr/local/bin/ bin/micromamba --strip-components=2
-
+# where mamba stuff goes and no banner
 ENV MAMBA_ROOT_PREFIX=/opt/conda \
     MAMBA_NO_BANNER=1
-SHELL ["/bin/bash", "-lc"]
 
-WORKDIR /app
-COPY config/setup/environment.yml /app/
+# create env, then delete the env file and cache
+RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
+    micromamba create -y -n app -f /tmp/environment.yml && \
+    micromamba clean --all --yes && \
+    rm -f /tmp/environment.yml
 
-RUN --mount=type=cache,target=/opt/conda/pkgs \
-    micromamba create -y -n app -f /app/environment.yml && \
-    micromamba clean -a -y
-
+# edit paths
 ENV PATH=/opt/conda/envs/app/bin:$PATH
 
-COPY src/* /app
-COPY config/train.yml /app
-RUN useradd -m appuser && chown -R appuser:appuser /app /opt/conda
-USER appuser
+# no root user
+RUN useradd -m -u 1000 -s /bin/bash coolguy
+USER coolguy
 
-# Runtime requires NVIDIA Container Toolkit on host; run with:
-# docker run --gpus all yourimage
-CMD ["python", "training/train/train.py --config train.yml"]
+WORKDIR /ProteinDiff/
