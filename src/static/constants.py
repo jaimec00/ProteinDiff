@@ -101,7 +101,7 @@ atoms = {
 }
 
 # initialize the amber pc tensor
-amber_partial_charges = torch.zeros(len(alphabet), max(len(atom_list) for atom_list in atoms.values()))
+amber_partial_charges = np.zeros((len(alphabet), max(len(atom_list) for atom_list in atoms.values())))
 
 # loop through atom types in the raw amber dict and assign the pc to the tensor
 for aa, atom_pcs in raw_charges.items():

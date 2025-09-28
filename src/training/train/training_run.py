@@ -7,44 +7,27 @@ description:	utility classes for training proteusAI
 # ----------------------------------------------------------------------------------------------------------------------
 
 import torch
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 import torch.optim.lr_scheduler as lr_scheduler
 
 from tqdm import tqdm
 import os
 
-from ProteinDiff import ProteinDiff
-from utils.train_utils.io_utils import Output
-from utils.train_utils.data_utils import DataHolder
-from utils.train_utils.training_run_utils import Epoch, Batch
-from utils.train_utils.losses import TrainingRunLosses
+from model import ProteinDiff
+from training.logger import Output
+from training.data.data_loader import DataHolder
+from training.train.training_run_utils import Epoch, Batch
+from training.losses import TrainingRunLosses
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-# detect anomolies in training
+# detect anomolies in training and allow tf32 matmuls
 torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 class TrainingRun:
-	'''
-	the main class for training. holds all of the configuration arguments, and organnizes them into hyper-parameters, 
-	training parameters, data, and output objects
-	also orchestrates the setup of training, training itself, validation, testing, outputs, etc.
 
-	Attributes:
-		hyper_parameters (Box): 	store model hyper_parameters
-		training_parameters (Box): 	stores training parameters
-		data (DataHolder): 			object to store data (contains objects of Data type), splits into train, 
-									val, and test depending on arguments, also capable of loading the Data
-		output (Output): 			holds information about where to write output to, also contains the logging object. comes with
-									methods to print logs, plot training, and save model parameters
-		losses (TrainingRunLosses):	stores losses over the training run and holds the loss functions
-		gpu (torch.device): 		for convenience in moving tensors to GPU
-		cpu (torch.device): 		for loading Data before moving to GPU
-
-	'''
-
-	def __init__(self, args):
+	def __init__(self, args: Box) -> None:
 
 		self.gpu = torch.device(f'cuda')
 		self.cpu = torch.device("cpu")
@@ -73,12 +56,11 @@ class TrainingRun:
 		self.training_parameters = args.training_parameters
 		
 		self.data = DataHolder(	args.data.data_path, # single chain or multichain
-								args.data.num_train, args.data.num_val, args.data.num_test, 
-								args.data.batch_tokens, args.data.max_batch_size, 
-								args.data.min_seq_size, args.data.max_seq_size, 
-								args.data.max_resolution,
-								args.training_parameters.regularization.homo_thresh, 
+								num_train=args.data.num_train, num_val=args.data.num_val, num_test=args.data.num_test, 
+								batch_tokens=args.data.batch_tokens, min_seq_size=args.data.min_seq_size, max_seq_size=args.data.max_seq_size, 
+								max_resolution=args.data.max_resolution, homo_thresh=args.training_parameters.regularization.homo_thresh, 
 								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae and classifier dont have residues communicate, no need for copies
+								num_workers=args.data.num_workers, prefetch_factor=args.data.prefetch_factor, rng_seed=args.data.rng_seed, buffer_size=args.data.buffer_size
 							)
 		
 		self.losses = TrainingRunLosses(	args.training_parameters.train_type,

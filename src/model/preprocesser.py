@@ -16,6 +16,7 @@ class PreProcesser(nn.Module):
 		self.register_buffer("amber_partial_charges", amber_partial_charges)
 		self.res = cell_dim 
 
+	@torch.no_grad()
 	def forward(self, C, L, atom_mask, valid_mask):
 		'''
 		C (torch.Tensor): full atomic coordinates of shape (Z,N,A,3)
@@ -24,24 +25,21 @@ class PreProcesser(nn.Module):
 		valid_mask (torch.Tensor): mask indicating which positions should be used for computation (e.g. neighbors computation)
 		'''
 
-		# no gradients here, as that would blow everything up, and this is all physics-based preprocessing, no learning
-		with torch.no_grad():
+		# get the backbone atoms, using virtual Cb
+		C_backbone = self.get_backbone(C) # Z,N,4,3
 
-			# get the backbone atoms, using virtual Cb
-			C_backbone = self.get_backbone(C) # Z,N,4,3
+		# compute unit vectors for each residue's local reference frame
+		local_origins, local_frames = self.compute_frames(C_backbone) # Z,N,3 and Z,N,3,3
 
-			# compute unit vectors for each residue's local reference frame
-			local_origins, local_frames = self.compute_frames(C_backbone) # Z,N,3 and Z,N,3,3
+		# create the voxel for each residue by rotating the base voxel to the local frame and translating to local origin, 
+		# simply contains the coordinates for the voxels
+		local_voxels = self.compute_voxels(local_origins, local_frames) # Z,N,Vx,Vy,Vz,3
 
-			# create the voxel for each residue by rotating the base voxel to the local frame and translating to local origin, 
-			# simply contains the coordinates for the voxels
-			local_voxels = self.compute_voxels(local_origins, local_frames) # Z,N,Vx,Vy,Vz,3
+		# compute electric fields 
+		fields = self.compute_fields(C, L, local_voxels, atom_mask)
 
-			# compute electric fields 
-			fields = self.compute_fields(C, L, local_voxels, atom_mask)
-
-			# compute divergence of the normed fields, hoping this is easier for diffusion
-			divergence = self.compute_divergence(fields)
+		# compute divergence of the normed fields, hoping this is easier for diffusion
+		divergence = self.compute_divergence(fields)
 
 		return C_backbone, divergence, local_frames
 

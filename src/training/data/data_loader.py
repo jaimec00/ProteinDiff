@@ -10,7 +10,7 @@ from multiprocessing import Value as shared_val
 from pathlib import Path
 import pandas as pd
 
-from train.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler
+from training.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler
 
 class DataHolder:
 

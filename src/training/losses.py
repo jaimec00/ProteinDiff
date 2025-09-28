@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 import numpy as np
 import math
-from data.constants import canonical_aas
+from static.constants import canonical_aas
 
 # ----------------------------------------------------------------------------------------------------------------------
 # losses 

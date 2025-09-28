@@ -12,7 +12,7 @@ import argparse
 import yaml
 import os
 
-from utils.train_utils.training_run import TrainingRun
+from training.train.training_run import TrainingRun
 
 # ----------------------------------------------------------------------------------------------------------------------
 
