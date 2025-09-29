@@ -230,9 +230,9 @@ class PDBData:
 			chain_info.append((self._metadata["chains"][asmb_chain], asmb_chain_data["mask"].shape[0]))
 
 		# cat
-		labels = numpy.concatenate(labels, axis=0)
-		coords = numpy.concatenate(coords, axis=0)
-		atom_mask = numpy.concatenate(atom_mask, axis=0)
+		labels = np.concatenate(labels, axis=0)
+		coords = np.concatenate(coords, axis=0)
+		atom_mask = np.concatenate(atom_mask, axis=0)
 
 		# mask for homo chain
 		homo_chains = np.arange(len(self._metadata["chains"]))[self._metadata["tm"][trgt_chain_idx, :, 1]>=self._homo_thresh]

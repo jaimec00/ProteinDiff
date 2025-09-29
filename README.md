@@ -1,7 +1,26 @@
 # ProteinDiff - Structure-Conditioned Latent Diffusion
 ## Summary
 
-ProteinDiff is a latent diffusion model for protein sequence generation given a target backbone structure. It aims to provide a truly generative model for this problem, by reframing it in such a way that the main diffusion model can learn the score of sequence space given a target structure. Here is a summary of the idea in broad strokes:
+ProteinDiff is a latent diffusion model for protein sequence generation given a target backbone structure. It aims to provide a truly generative model for this problem, by reframing it in such a way that the main diffusion model can learn the score of sequence space given a target structure. 
+
+## Setup
+
+Thus far, I am still working on setting up the model architecture and training logic. Once this is done, I will move on to making the model scalable by adding hybrid parallelism (FSDP, PP, TP). For now, here is how to setup the environment to develop.
+
+First you need to build the image. Make sure you have docker installed on your machine, and that you have gpus on your machine (in the process of developing some custom cuda kernels)
+
+```shell
+sudo docker build -t proteindiff:dev -f config/setup/Dockerfile .
+```
+
+Once the image is built, you can use docker compose to run a shell in the environment (debug service) or to directly train the model (train service).
+
+```shell
+sudo docker compose -f config/setup/docker-compose.yml run --rm <debug,train>
+```
+
+## Architecture
+Here is a summary of the idea in broad strokes:
 
 There are three stages for training the model:
 1. SideChain VAE
@@ -17,22 +36,19 @@ The input to the SideChain VAE is the full atomic coordinates, and the amino aci
 
 1. First step is to compute the virtual $C_\beta$ atom from empirical constants.
 2. Next step is to define a local coordinate frame for each residue: 
-    - The y-axis is the vector pointing from $C_\alpha$ to the $C_\beta$
-    - The x-axis is the vector that is pointing from N to C projected onto the plane normal to the y-axis vector
+    - The y-axis is the vector pointing from $C_\alpha \rightarrow C_\beta$
+    - The x-axis is the vector that is pointing from $N \rightarrow C$ projected onto the plane normal to the y-axis vector
     - The z-axis is the cross product of the two.  
     - Use the virtual $C_\beta$ if used for frame computation, but the true position for electrostatic field computation later (no $C_\beta$ for glycine).
-3. Using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z$ (e.g. 16 x 16 x 16, , giving $16\times16\times16\times = 512$ cells, in this case each cell is $0.75^3$ $\AA^3$, making the whole voxel 1728 $\AA^3$)
+3. Using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z$ (e.g. 16 x 16 x 16)
 4. For each atom we assign a partial charge using the AMBER partial charges from ff19SB. using the electric vector field formula, for each residue, we sum the electric effects of all atoms of the residue relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the local electric field at that point. However, this introduces a few problems
     - The voxel is large enough to capture the majority of amino acid rotamers, but the downside is that the majority of the voxel will be empty, making it easy to overfit to these empty regions. To prevent this, we normalize the vector of each cell to unit length, making the voxel field purely directional. This does, however, introduce another problem.
     - If the model is trained to denoise unit vectors, these unit vectors do not lie on a Euclidian manifold, they lie on S2 manifold, which would require specialized noise, such as Brownian motion instead of Gaussian noise, and special denoising techniques. To counteract this, we compute the divergence of this directional field, which is a scalar field and lies on a Euclidean manifold. To achieve this, we use finite differences technique. Note that in a true electric field, the divergence is zero everwhere except at the points containing charges, but this is no longer the case since we normed all vectors to unit length.
     - Here is an example of what the scalar field looks like for a single amino acid, along with what gaussian noise looks like in the voxel. All cells within [-0.5,0.5] have been whitened out for the purposes of visualization.
 
 <p align="center">
-  <img src="docs/img/true.png" alt="Arch" width="800"/>
-</p>
-
-<p align="center">
-  <img src="docs/img/noise.png" alt="Arch" width="800"/>
+  <img src="docs/img/true.png" alt="Arch" width="500"/>
+  <img src="docs/img/noise.png" alt="Arch" width="500"/>
 </p>
 
 5. Thus far, all the steps performed are essentially preprocessing steps. But here is where it gets interesting.

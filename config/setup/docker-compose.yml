@@ -24,7 +24,7 @@ services:
     <<: *common
     stdin_open: true   # same as docker run -i
     tty: true          # same as docker run -t
-    command: /bin/bash -l -i  # default to a shell (you can still override)
+    command: /bin/bash -l -i  # run a shell
   train:
     <<: *common
     command: python src/training/train/train.py --config config/train.yml

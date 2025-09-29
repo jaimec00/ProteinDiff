@@ -14,12 +14,12 @@ ENV MAMBA_ROOT_PREFIX=/opt/conda \
 
 # create env, then delete the env file and cache
 RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
-    micromamba create -y -n app -f /tmp/environment.yml && \
+    micromamba create -y -n ProteinDiff_env -f /tmp/environment.yml && \
     micromamba clean --all --yes && \
     rm -f /tmp/environment.yml
 
 # edit paths
-ENV PATH=/opt/conda/envs/app/bin:$PATH
+ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
 
 # no root user
 RUN useradd -m -u 1000 -s /bin/bash coolguy

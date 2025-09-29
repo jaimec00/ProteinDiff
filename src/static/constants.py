@@ -1,8 +1,7 @@
 '''
 hold constants that are reused throughout the model here
 '''
-from data.amber.parse_amber_lib import parse_amber_lib
-import torch
+from static.amber.parse_amber_lib import parse_amber_lib
 import numpy as np
 
 # dict to convert amino acid three letter codes to one letter
@@ -47,10 +46,10 @@ def aa_2_lbl(aa):
         return aa_2_lbl_dict["X"]
 
 def lbl_2_aa(label): 
-    if label==-1:
-        return "X"
-    else:
+    if label in lbl_2_aa_dict:
         return lbl_2_aa_dict[label]
+    else:
+        return "X"
 
 # 256-entry LUT for byte values -> label, used to vectorize seq to label
 lut = np.full(256, aa_2_lbl("X"), dtype=np.int64) # X is default for unkown characters
@@ -59,7 +58,7 @@ for aa, lbl in aa_2_lbl_dict.items(): # populate the lut array, each index corre
     if len(byte)==1: # skip mult character aa (e.g. <mask>)
         lut[byte[0]] = lbl
 
-def seq_2_lbls(seq, device):
+def seq_2_lbls(seq):
     '''
     converts a string of amino acids (one-letter codes) to a tensor of labels
     does this in vectorized fashion
