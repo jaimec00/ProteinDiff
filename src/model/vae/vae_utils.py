@@ -2,8 +2,6 @@
 import torch
 import torch.nn as nn
 
-from flash_attn_interface import flash_attn_varlen_func
-
 class ResNet(nn.Module):
 	def __init__(self, d_model=128, kernel_size=2, layers=1):
 
@@ -24,12 +22,12 @@ class ResNet(nn.Module):
 		return latent
 
 class MPNN(nn.Module):
-    def __init__(self, d_model=256, update_edges=True):
+	def __init__(self, d_model=256, update_edges=True):
 		super().__init__()
 
 		self.node_mlp = MLP()
-        self.ln1 = nn.LayerNorm(d_model)
-        
+		self.ln1 = nn.LayerNorm(d_model)
+		
 		self.ffn = MLP()
 		self.ln2 = nn.LayerNorm(d_model)
 
@@ -38,13 +36,13 @@ class MPNN(nn.Module):
 			self.edge_mlp = MLP()
 			self.edge_ln = nn.LayerNorm(d_model)
 
-    def forward(self, nodes, edges, nbrs, nbr_mask):
-        
-        nodes = self._node_msg(nodes, edges, nbrs, nbrs_mask)
+	def forward(self, nodes, edges, nbrs, nbr_mask):
+		
+		nodes = self._node_msg(nodes, edges, nbrs, nbrs_mask)
 		edges = self._edge_msg(nodes, edges, nbrs, nbr_mask)
 		return nodes, edges
 
-    def _node_msg(self, nodes, edges, nbrs, nbr_mask):
+	def _node_msg(self, nodes, edges, nbrs, nbr_mask):
 
 		message = self._create_msg(nodes, edges, nbrs, nbr_mask)
 		nodes1 = torch.sum(self.node_mlp(message) * nbr_mask.unsqueeze(-1), dim=2)
@@ -64,16 +62,16 @@ class MPNN(nn.Module):
 	def _create_msg(nodes, edges, nbrs, nbr_mask):
 		Z, N, K, D = edges.shape
 		nodes_i = nodes.unsqueeze(2).expand(Z, N, K, D)
-        nodes_j = torch.gather(nodes_i, 1, nbrs)
+		nodes_j = torch.gather(nodes_i, 1, nbrs)
 		message = torch.cat(nodes_i, nodes_j, edges)
 		return message
 
 
 class EdgeEncoder(nn.Module):
-    def __init__(self, d_model=256, top_k=16):
-        super().__init__()
+	def __init__(self, d_model=256, top_k=16):
+		super().__init__()
 
-        # rbf stuff (rbfs w/ linearly spaced centers of inter-residue backbone atom pairs)
+		# rbf stuff (rbfs w/ linearly spaced centers of inter-residue backbone atom pairs)
 		min_rbf, max_rbf, num_rbf = 2.0, 22.0, 16
 		self.register_buffer("rbf_centers", torch.linspace(min_rbf, max_rbf, num_rbf))
 		self.spread = (max_rbf - min_rbf) / num_rbf
@@ -90,14 +88,14 @@ class EdgeEncoder(nn.Module):
 		self.edge_mlp = MLP(d_in=d_model*3, d_out=d_model, d_hidden=d_model, hidden_layers=2, ac="silu")
 		self.edge_ln = nn.LayerNorm(d_model)
 
-    def forward(self, coords_bb, frames, seq_pos, chain_pos, valid_mask):
+	def forward(self, coords_bb, frames, seq_pos, chain_pos, valid_mask):
 
-        nbrs, nbr_mask = self._get_neighbors(coords_bb, valid_mask)
+		nbrs, nbr_mask = self._get_neighbors(coords_bb, valid_mask)
 		edges = self._get_edges(coords_bb, frames, seq_pos, chain_pos, nbrs)
-        return edges, nbrs, nbr_mask
+		return edges, nbrs, nbr_mask
 
 
-    @torch.no_grad()
+	@torch.no_grad()
 	def _get_neighbors(self, C, valid_mask):
 
 		# prep
@@ -175,37 +173,3 @@ class EdgeEncoder(nn.Module):
 
 		return rel_idx
 
-class FlashMHA(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-
-		self.H = heads
-		self.Dm = d_model
-		self.Dk = d_model // heads
-
-		xavier_scale = (6/(self.Dk + d_model))**0.5
-
-		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(self.H, self.Dm, self.Dk) * (2*xavier_scale)) # H x Dm x Dk
-		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.H, self.Dm, self.Dk) * (2*xavier_scale)) # H x Dm x Dk
-		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(self.H, self.Dm, self.Dk) * (2*xavier_scale)) # H x Dm x Dk
-
-		self.q_bias = nn.Parameter(torch.zeros(self.H, self.Dk)) # H x Dk
-		self.k_bias = nn.Parameter(torch.zeros(self.H, self.Dk)) # H x Dk
-		self.v_bias = nn.Parameter(torch.zeros(self.H, self.Dk)) # H x Dk
-
-		self.out_proj = nn.Linear(d_model, d_model, bias=False)
-
-    def forward(self, x, mask):
-
-		# convenience
-		Z, N, Dm = x.shape
-		H = self.H
-		Dk = self.Dk
-
-		# project the tensors, doing reshape for readability
-		Q = torch.matmul(x.reshape(Z, N, ), self.q_proj.reshape(1,H,Dm,Dk)) + self.q_bias.reshape(1,H,1,Dk) # Z,1,N,Dm@1,H,Dm,Dk->Z,H,N,Dk
-		K = torch.matmul(x.reshape(Z, N, ), self.k_proj.reshape(1,H,1,Dm,Dk)) + self.k_bias.reshape(1,H,1,1,Dk) # Z,1,N,K,Dm@1,H,1,Dm,Dk->Z,H,N,K,Dk
-		V = torch.matmul(x.reshape(Z, N, ), self.v_proj.reshape(1,H,1,Dm,Dk)) + self.v_bias.reshape(1,H,1,1,Dk) # Z,1,N,K,Dm@1,H,1,Dm,Dk->Z,H,N,K,Dk
-
-		# cretae attn mat
