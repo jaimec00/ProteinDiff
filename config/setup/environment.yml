@@ -17,8 +17,5 @@ dependencies:
   - matplotlib
   - plotly
   - python-box
-  - ninja
-
-
   - pip:
     - ninja

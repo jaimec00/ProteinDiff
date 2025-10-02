@@ -16,6 +16,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git \
         ca-certificates \
         ninja-build \
+        build-essential \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # copy micromamba bin to nvidia env
@@ -33,21 +35,19 @@ RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
     rm -f /tmp/environment.yml
 
 
+# edit paths
+ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
+    
 # Build & install FA3
 RUN --mount=type=cache,target=/root/.cache/pip \
     micromamba run -n ProteinDiff_env bash -lc '\
-        set -euo pipefail && \
+        set -euo pipefail && \       
         git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
         cd /tmp/flash-attention && \
         git reset --hard 5059fd5 && \
-        cd hopper && \
         python setup.py install \
     ' && \
     rm -rf /tmp/flash-attention
-
-
-# edit paths
-ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
 
 # no root user
 RUN useradd -m -u 1000 -s /bin/bash coolguy

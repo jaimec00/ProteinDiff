@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from flash_attn_interface import flash_attn_varlen_func
+from flash_attn_interface import flash_attn_varlen_qkvpacked_func
 
 class MLP(nn.Module):
 	'''
@@ -59,13 +59,8 @@ class FlashMHA(nn.Module):
 		d_k = d_model // heads
 		xavier_scale = (6/(d_k + d_model))**0.5
 
-		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(heads, d_model, d_k) * (2*xavier_scale)) # H x Dm x Dk
-		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(heads, d_model, d_k) * (2*xavier_scale)) # H x Dm x Dk
-		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(heads, d_model, d_k) * (2*xavier_scale)) # H x Dm x Dk
-
-		self.q_bias = nn.Parameter(torch.zeros(heads, d_k)) # H x Dk
-		self.k_bias = nn.Parameter(torch.zeros(heads, d_k)) # H x Dk
-		self.v_bias = nn.Parameter(torch.zeros(heads, d_k)) # H x Dk
+		self.qkv_proj = nn.Parameter(-xavier_scale + torch.rand(3, heads, d_model, d_k) * (2*xavier_scale)) # 3 x H x Dm x Dk
+		self.qkv_bias = nn.Parameter(torch.zeros(3, heads, d_k)) # 3 x H x Dk
 
 		self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
@@ -73,38 +68,44 @@ class FlashMHA(nn.Module):
 
 		# convenience
 		Z, N, Dm = x.shape
-		H, _, Dk = self.q_proj.shape
+		_. H, _, Dk = self.qkv_proj.shape
 
-		# project the tensors, doing reshape for readability
-		x = x.unsqueeze(1) # Z x 1 x N x Dm
-		Q = torch.matmul(x, self.q_proj.reshape(1,H,Dm,Dk)) + self.q_bias.reshape(1,H,1,Dk) # Z,1,N,Dm@1,H,Dm,Dk + 1xHx1xDk->Z,H,N,Dk
-		K = torch.matmul(x, self.k_proj.reshape(1,H,Dm,Dk)) + self.k_bias.reshape(1,H,1,Dk) # Z,1,N,Dm@1,H,Dm,Dk + 1xHx1xDk->Z,H,N,Dk
-		V = torch.matmul(x, self.v_proj.reshape(1,H,Dm,Dk)) + self.v_bias.reshape(1,H,1,Dk) # Z,1,N,Dm@1,H,Dm,Dk + 1xHx1xDk->Z,H,N,Dk
+		# get indices of non pad positions
+		indices = mask.flatten().nonzero(as_tuple=False).flatten().reshape(-1,1,1,1).expand(-1,3,H,Dk)
 
-		# now need to reshape it for flash attention kernel
-		indices = mask.flatten().nonzero(as_tuple=False).flatten().reshape(-1,1,1).expand(-1,H,Dk)
-		Q = Q.permute(0,2,1,3).reshape(Z*N, H, Dk).gather(0, indices).to(torch.float16).contiguous() # ZN(valid), H, Dk
-		K = K.permute(0,2,1,3).reshape(Z*N, H, Dk).gather(0, indices).to(torch.float16).contiguous()
-		V = V.permute(0,2,1,3).reshape(Z*N, H, Dk).gather(0, indices).to(torch.float16).contiguous()
+		# project the tensors
+		QKV = torch.matmul(x.reshape(Z,1,1,N,Dm), self.qkv_proj.reshape(1,3,H,Dm,Dk)) + self.qkv_bias.reshape(1,3,H,1,Dk) # Z,1,1,N,Dm@1,3,H,Dm,Dk + 1x3xHx1xDk->Z,3,H,N,Dk
 
-		# compute cu seq lens for kernel
+		# reshape and use indices to unpad
+		QKV_unpad = QKV.permute(0,3,1,2,4).reshape(Z*N, 3, H, Dk).gather(0, indices).to(torch.float16).contiguous() # ZN(valid), 3, H, Dk
+
+		# compute cu seq lens and max seq len for kernel
 		seq_lens = mask.sum(dim=1) # Z, 
 		max_seqlen = seq_lens.max().item()  # 1,
 		cu_seqlens = F.pad(seq_lens.cumsum(dim=-1), (1,0)).to(torch.int32) # Z+1,
 
-		# flash attention 3 (hopper)
-		flat_out = flash_attn_varlen_func( # ZN(valid) x H x Dk
-			Q, K, V,
-			cu_seqlens, cu_seqlens, # q_cu_seqlens, k_cu_seqlens
-			max_seqlen, max_seqlen, # q_max_seqlen, k_max_seqlen
-			softmax_scale=Dk**-0.5,
-			deterministic=True # for deterministic bwd
+		# dropout if in training
+		dropout_p = self.dropout_p if self.training else 0.0
+
+		# flash attention 2
+		out_unpad = flash_attn_varlen_qkvpacked_func( # ZN(valid) x H x Dk
+			QKV_unpad,
+			cu_seqlens, # q_cu_seqlens, k_cu_seqlens
+			max_seqlen, # q_max_seqlen, k_max_seqlen
+			dropout_p=dropout_p, # dropout
+			softmax_scale=Dk**-0.5, # sm scale
+			deterministic=dropout_p>0.0 # for deterministic bwd, only when dropout is used
 		)
 
+		# init the output
 		out = torch.zeros(Z*N, H, Dk, device=x.device, dtype=x.dtype)
-		out = torch.scatter(out, 0, indices, flat_out).reshape(Z, N, Dm) # reshapes to split Z and N, and cat heads to get Dm in one go
 
+		# scatter the unpadded output to the padded, and reshape
+		out = torch.scatter(out, 0, indices, out_unpad).reshape(Z, N, Dm) # reshapes to split Z and N, and cat heads to get Dm in one go
+
+		# output projection
 		out = self.out_proj(out)
+
 		return out
 
 
