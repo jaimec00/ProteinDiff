@@ -12,9 +12,6 @@ __pycache__/
 .env
 .env.*
 
-# Node/JS (if present)
-node_modules/
-
 # Data & artifacts
 *.log
 dist/
