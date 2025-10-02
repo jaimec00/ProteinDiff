@@ -38,7 +38,9 @@ RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
 # edit paths
 ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
     
-# Build & install FA3
+# Build & install FA2
+# keep getting oom when let it run on all cores
+ENV MAX_JOBS=8
 RUN --mount=type=cache,target=/root/.cache/pip \
     micromamba run -n ProteinDiff_env bash -lc '\
         set -euo pipefail && \       
