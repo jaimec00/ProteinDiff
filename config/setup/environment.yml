@@ -7,6 +7,7 @@ channels:
 dependencies:
   - python>=3.9
   - pytorch=2.5.1
+  - pip
   - numpy
   - pandas
   - requests
@@ -16,6 +17,8 @@ dependencies:
   - matplotlib
   - plotly
   - python-box
+  - ninja
 
 
-
+  - pip:
+    - ninja

@@ -4,6 +4,20 @@
 FROM mambaorg/micromamba:1.5.8 AS mmb
 FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS runtime
 
+# Ensure noninteractive apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- Install OS deps needed during build/runtime ---
+# Use BuildKit caches for apt metadata and package cache
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+        ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
 # copy micromamba bin to nvidia env
 COPY --from=mmb /bin/micromamba /usr/local/bin/micromamba
 COPY config/setup/environment.yml /tmp/
@@ -20,17 +34,17 @@ RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
 
 
 # Build & install FA3
-# Notes:
-#  - use --no-build-isolation so it uses the env's torch/pybind/etc.
-#  - FA3 build system uses setup.py in the hopper/ folder.
 RUN --mount=type=cache,target=/root/.cache/pip \
     micromamba run -n ProteinDiff_env bash -lc '\
-      python -m pip install --upgrade pip setuptools wheel && \
-      git clone --depth 1 --branch "${FA3_REF}" https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
-      cd /tmp/flash-attention/hopper && \
-      python setup.py install \
+        set -euo pipefail && \
+        git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
+        cd /tmp/flash-attention && \
+        git reset --hard 5059fd5 && \
+        cd hopper && \
+        python setup.py install \
     ' && \
     rm -rf /tmp/flash-attention
+
 
 # edit paths
 ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
@@ -40,9 +54,3 @@ RUN useradd -m -u 1000 -s /bin/bash coolguy
 USER coolguy
 
 WORKDIR /ProteinDiff/
-
-# install flash attention (for hopper)
-RUN git clone https://github.com/Dao-AILab/flash-attention.git@5059fd53e602bcc00336bb5cc8a85e50940485cb && \
-    cd hopper && \
-    python setup.py install && \
-    
