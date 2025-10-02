@@ -1,6 +1,7 @@
 
 import torch
 import torch.nn as nn
+from model.utils.base_modules import MLP, FlashMHA
 
 class ResNet(nn.Module):
 	def __init__(self, d_model=128, kernel_size=2, layers=1):
@@ -25,21 +26,21 @@ class MPNN(nn.Module):
 	def __init__(self, d_model=256, update_edges=True):
 		super().__init__()
 
-		self.node_mlp = MLP()
+		self.node_mlp = MLP(d_in=3*d_model, d_hidden=d_model, d_out=d_model, num_hidden=2, act="silu")
 		self.ln1 = nn.LayerNorm(d_model)
 		
-		self.ffn = MLP()
+		self.ffn = MLP(d_in=d_model, d_hidden=4*d_model, d_out=d_model, num_hidden=0, act="silu")
 		self.ln2 = nn.LayerNorm(d_model)
 
 		self._update_edges = update_edges
 		if update_edges:
-			self.edge_mlp = MLP()
+			self.edge_mlp = MLP(d_in=3*d_model, d_hidden=d_model, d_out=d_model, num_hidden=2, act="silu")
 			self.edge_ln = nn.LayerNorm(d_model)
 
 	def forward(self, nodes, edges, nbrs, nbr_mask):
 		
 		nodes = self._node_msg(nodes, edges, nbrs, nbrs_mask)
-		edges = self._edge_msg(nodes, edges, nbrs, nbr_mask)
+		edges = self._edge_msg(nodes, edges, nbrs)
 		return nodes, edges
 
 	def _node_msg(self, nodes, edges, nbrs, nbr_mask):
@@ -50,20 +51,20 @@ class MPNN(nn.Module):
 		nodes = self.ln2(self.ffn(nodes) + nodes)
 		return nodes
 
-	def _edge_msg(self, nodes, edges, nbrs, nbr_mask):
+	def _edge_msg(self, nodes, edges, nbrs):
 		
 		if self._update_edges:
-			message = self._create_msg(nodes, edges, nbrs, nbr_mask)
+			message = self._create_msg(nodes, edges, nbrs)
 			edges = self.edge_ln(edges + self.edge_mlp(message))
 
 		return edges
 
 
-	def _create_msg(nodes, edges, nbrs, nbr_mask):
+	def _create_msg(nodes, edges, nbrs):
 		Z, N, K, D = edges.shape
 		nodes_i = nodes.unsqueeze(2).expand(Z, N, K, D)
 		nodes_j = torch.gather(nodes_i, 1, nbrs)
-		message = torch.cat(nodes_i, nodes_j, edges)
+		message = torch.cat([nodes_i, nodes_j, edges], dim=-1)
 		return message
 
 
@@ -173,3 +174,36 @@ class EdgeEncoder(nn.Module):
 
 		return rel_idx
 
+
+class Transformer(nn.Module):
+	def __init__(self, d_model=256, heads=8):
+		super().__init__()
+		self.attn = FlashMHA(d_model=d_model, heads=heads)
+		self.attn_norm = nn.LayerNorm(d_model)
+		self.ffn = MLP(d_in=d_model, d_hidden=4*d_model, d_out=d_model, num_hidden=0, act="silu")
+		self.ffn_norm = nn.LayerNorm(d_model)
+
+	def forward(self, x, valid_mask):
+		x1 = self.attn(x, valid_mask)
+		x = self.attn_norm(x+x1)
+		x1 = self.ffn(x)
+		x = self.ffn_norm(x+x1)
+		return x
+
+
+class PairwiseProjHead(nn.Module):
+    def __init__(self, d_model, d_down, dist_bins, angle_bins):
+        super().__init__()
+        self.downsample = nn.Linear(d_model, d_down)
+        self.bin = MLP(d_in=2*d_down, d_hidden=dist_bins+angle_bins, d_out=dist_bins+angle_bins, num_hidden=1, act="silu")
+        self._dist_bins = dist_bins
+        self._angle_bins = angle_bins
+
+    def forward(self, x):
+
+        q, k = torch.chunk(self.downsample(x), chunks=2, dim=-1) # Z x N x D//2
+        q_i, k_j = q.unsqueeze(2), k.unsqueeze(1)
+        prod, diff = q_i*k_j, k_j-q_i
+        pw = torch.cat([prod, diff], dim=-1) # Z x N x N x D
+        distogram, anglogram = torch.chunk(self.bin(pw), chunks=[self._dist_bins, self._angle_bins], dim=-1)
+        return distogram, anglogram
