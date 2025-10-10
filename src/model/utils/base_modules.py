@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from flash_attn_interface import flash_attn_varlen_qkvpacked_func
+from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 
 class MLP(nn.Module):
 	'''
@@ -68,7 +68,8 @@ class FlashMHA(nn.Module):
 
 		# convenience
 		ZN, Dm = x.shape
-		_. H, _, Dk = self.qkv_proj.shape
+		x_dtype = x.dtype
+		_, H, _, Dk = self.qkv_proj.shape
 
 		# project the tensors
 		QKV = torch.matmul(x.reshape(1,1,ZN,Dm), self.qkv_proj.reshape(3,H,Dm,Dk)) + self.qkv_bias.reshape(3,H,1,Dk) # 1,1,ZN,Dm@3,H,Dm,Dk + 3xHx1xDk->3,H,ZN,Dk
@@ -87,7 +88,7 @@ class FlashMHA(nn.Module):
 			dropout_p=dropout_p, # dropout
 			softmax_scale=Dk**-0.5, # sm scale
 			deterministic=dropout_p>0.0 # for deterministic bwd, only when dropout is used
-		)
+		).to(x_dtype)
 
 		# output projection
 		out = self.out_proj(out.reshape(ZN, Dm))

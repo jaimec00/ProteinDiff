@@ -19,6 +19,17 @@ Once the image is built, you can use docker compose to run a shell in the enviro
 sudo docker compose -f config/setup/docker-compose.yml run --rm <debug,train>
 ```
 
+You may also want to download the training data. as of right now, I am using the dataset curated for ProteinMPNN. In the future, I will make my own dataset which will include sample from PDB, AFDB, and ESMAtlas. here is how to download the PMPNN dataset (do this BEFORE running <docker compose ...>):
+
+```shell
+DATA_PATH=/PATH/TO/YOUR/DATA && \
+wget https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz -P $DATA_PATH && \
+tar -xzf $DATA_PATH/pdb_2021aug02.tar.gz -C $DATA_PATH && \
+rm $DATA_PATH/pdb_2021aug02.tar.gz
+```
+
+Then make sure to update the config/setup/docker-compose.yml file to reflect the path to your data
+
 ## Architecture
 Here is a summary of the idea in broad strokes:
 

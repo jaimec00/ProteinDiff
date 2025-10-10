@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-from utils.model_utils.latent_diffusion.diffusion_utils import NodeDenoiser, CosineScheduler
+from model.latent_diffusion.diffusion_utils import NodeDenoiser, CosineScheduler
+from model.utils.base_modules import MLP
+from static.constants import alphabet
 
 class Diffusion(nn.Module):
 	def __init__(self, d_model=256, d_sc_latent=16, d_bb_latent=256, layers=12, heads=8, t_max=1000, parameterization="eps"):
@@ -10,8 +12,10 @@ class Diffusion(nn.Module):
 		self.register_buffer("t_wavenumbers", 10000**-(2*torch.arange(d_model//2)/d_model))
 		self.noise_scheduler = CosineScheduler(t_max)
 		self.parameterization = parameterization
+		self.seq_emb = nn.Embedding(len(alphabet), d_model)
+		self.conditioner = MLP(d_in=d_model*2, d_hidden=d_model, d_out=d_model, hidden_layers=1, act="silu")
 
-		self.latent_proj = MLP(d_in=d_sc_latent+d_bb_latent, d_out=d_model, d_hidden=d_model, num_hidden=1, act="silu")
+		self.latent_proj = MLP(d_in=d_sc_latent+d_bb_latent, d_out=d_model, d_hidden=d_model, hidden_layers=1, act="silu")
 		self.denoiser = NodeDenoiser(d_model=d_model, layers=layers, heads=heads)
 		self.pred_proj = nn.Linear(d_model, d_sc_latent, bias=False)
 	
@@ -48,7 +52,7 @@ class Diffusion(nn.Module):
 		# prep and start from white noise latents
 		ZN = bb_latent.size(0)
 		device = bb_latent.device
-		sc_latent = torch.randn([ZN, self.d_latent], device=device)
+		sc_latent = torch.randn([ZN, self.d_sc_latent], device=device)
 
 		# initialize t
 		t = torch.tensor([self.noise_scheduler.t_max-1], device=device)
@@ -56,7 +60,7 @@ class Diffusion(nn.Module):
 		while t.item() >= 0:
 			
 			# predict noise
-			pred = self.denoise(sc_latent, bb_latent, seq, t, cu_seqlens, max_seqlen)
+			pred = self.denoise(sc_latent, bb_latent, t.expand(ZN), seq, cu_seqlens, max_seqlen)
 
 			# remove noise
 			sc_latent = self.nudge(sc_latent, pred, t, step_size=step_size)
@@ -85,7 +89,7 @@ class Diffusion(nn.Module):
 			x0 = (alphas*latent - sigmas*v_pred) /  (alphas**2 + sigmas**2)
 			eps_t = (sigmas*latent + alphas*v_pred) /  (alphas**2 + sigmas**2)
 
-		abars_tminus_step = self.noise_scheduler.get_abars(max(0,t-step_size)).reshape(-1, 1)
+		abars_tminus_step = self.noise_scheduler.get_abars((t-step_size).clamp(min=0)).reshape(-1, 1)
 		alphas_tminus_step = abars_tminus_step**0.5
 		sigmas_tminus_step = (1-abars_tminus_step)**0.5
 

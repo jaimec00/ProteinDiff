@@ -22,7 +22,7 @@ class ProteinDiff(nn.Module):
 						top_k: int=16, voxel_dim: int=16, cell_dim: float=0.75,
 						sc_enc_layers: int=1, sc_dec_layers: int=1, sc_class_layers: int=1, 
 						bb_enc_layers: int=1, bb_dec_layers: int=1, bb_dec_heads: int=8,
-						diff_layers: int=1, diff_heads: int=8, diff_parameterization: str="eps"
+						diff_layers: int=1, diff_heads: int=8, diff_parameterization: str="eps", t_max: int=1000
 						) -> None:
 		super().__init__()
 		'''
@@ -35,12 +35,13 @@ class ProteinDiff(nn.Module):
 		self.prep = PreProcesser(voxel_dim=voxel_dim, cell_dim=cell_dim)
 		self.sc_vae = SideChainVAE(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_sc_latent, resnet_enc_layers=sc_enc_layers, resnet_dec_layers=sc_dec_layers, resnet_class_layers=sc_enc_layers)
 		self.bb_vae = BackBoneVAE(d_model=d_model, d_latent=d_bb_latent, top_k=top_k, enc_layers=bb_enc_layers, dec_layers=bb_dec_layers, dec_heads=bb_dec_heads)
-		self.diffusion = Diffusion(d_model=d_diffusion, d_sc_latent=d_sc_latent, d_bb_latent=d_bb_latent, layers=diff_layers, heads=diff_heads, parameterization=diff_parameterization, t_max=1000)
+		self.diffusion = Diffusion(d_model=d_diffusion, d_sc_latent=d_sc_latent, d_bb_latent=d_bb_latent, layers=diff_layers, heads=diff_heads, parameterization=diff_parameterization, t_max=t_max)
 
 	def forward(self, 	coords: torch.Tensor, labels: torch.Tensor, 
 						seq_pos: torch.Tensor=None, chain_pos: torch.Tensor=None, 
-						atom_mask: torch.Tensor=None, no_seq_mask: torch.Tensor=None, 
-						sample_idx: torch.Tensor=None, cu_seqlens: torch.Tensor=None, max_seqlen: int=None,
+						atom_mask: torch.Tensor=None, 
+						cu_seqlens: torch.Tensor=None, max_seqlen: int=None,
+						no_seq_mask: torch.Tensor=None, sample_idx: torch.Tensor=None,
 						run_type: str="inference"
 						) -> torch.Tensor | Tuple[torch.Tensor]:
 		'''
@@ -65,9 +66,9 @@ class ProteinDiff(nn.Module):
 
 		match run_type:
 			case "sc_vae": return self._run_sc_vae(coords, labels, atom_mask)
-			case "bb_vae": return self._run_bb_vae(coords, seq_pos, chain_pos, sample_idx)
-			case "diffusion": return self._run_diffusion(coords, labels, seq_pos, chain_pos, atom_mask, no_seq_mask)
-			case "inference": return self._run_inference(coords, labels, seq_pos, chain_pos, valid_mask)
+			case "bb_vae": return self._run_bb_vae(coords, seq_pos, chain_pos, cu_seqlens, max_seqlen, sample_idx)
+			case "diffusion": return self._run_diffusion(coords, labels, atom_mask, seq_pos, chain_pos, cu_seqlens, max_seqlen, sample_idx, no_seq_mask)
+			case "inference": return self._run_inference(coords, labels, seq_pos, chain_pos, cu_seqlens, max_seqlen, sample_idx, no_seq_mask)
 			case "-": raise ValueError(f"invalid run_type: {run_type}. must be one of ['inference', 'sc_vae', 'bb_vae', 'diffusion']")
 	
 	def _run_sc_vae(self, coords: torch.Tensor, labels: torch.Tensor, atom_mask: torch.Tensor) -> Tuple[torch.Tensor]:
@@ -81,7 +82,7 @@ class ProteinDiff(nn.Module):
 		return latent_mu, latent_logvar, decoded_voxels, voxels, seq
 
 	def _run_bb_vae(self, 	coords: torch.Tensor, seq_pos: torch.Tensor, chain_pos: torch.Tensor, 
-							sample_idx: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int
+							cu_seqlens: torch.Tensor, max_seqlen: int, sample_idx: torch.Tensor
 							) -> Tuple[torch.Tensor]:
 
 		# get bb and frames
@@ -92,10 +93,10 @@ class ProteinDiff(nn.Module):
 
 		return latent_mu, latent_logvar, distogram, anglogram, seq_pred
 
-	def _run_diffusion(self, 	coords: torch.Tensor, labels: torch.Tensor, 
+	def _run_diffusion(self, 	coords: torch.Tensor, labels: torch.Tensor, atom_mask: torch.Tensor,
 								seq_pos: torch.Tensor, chain_pos: torch.Tensor, 
-								sample_idx: torch.Tensor, cu_seqlens: torch.Tensor, 
-								max_seqlen: torch.Tensor, no_seq_mask: torch.Tensor
+								cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor, 
+								sample_idx: torch.Tensor, no_seq_mask: torch.Tensor
 								) -> Tuple[torch.Tensor]:
 
 		# get backbone coords
@@ -124,7 +125,8 @@ class ProteinDiff(nn.Module):
 
 	def _run_inference(self, 	coords: torch.Tensor, labels: torch.Tensor, 
 								seq_pos: torch.Tensor, chain_pos: torch.Tensor, 
-								cu_seqlens: torch.Tensor, max_seqlen: int, no_seq_mask: torch.Tensor
+								cu_seqlens: torch.Tensor, max_seqlen: int, 
+								sample_idx: torch.Tensor, no_seq_mask: torch.Tensor
 								) -> torch.Tensor:
 
 		# extract bb coords (including VIRTUAL Cb) and local frames

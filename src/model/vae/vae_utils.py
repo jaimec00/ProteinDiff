@@ -26,15 +26,15 @@ class MPNN(nn.Module):
 	def __init__(self, d_model=256, update_edges=True):
 		super().__init__()
 
-		self.node_mlp = MLP(d_in=3*d_model, d_hidden=d_model, d_out=d_model, num_hidden=2, act="silu")
+		self.node_mlp = MLP(d_in=3*d_model, d_hidden=d_model, d_out=d_model, hidden_layers=2, act="silu")
 		self.ln1 = nn.LayerNorm(d_model)
 		
-		self.ffn = MLP(d_in=d_model, d_hidden=4*d_model, d_out=d_model, num_hidden=0, act="silu")
+		self.ffn = MLP(d_in=d_model, d_hidden=4*d_model, d_out=d_model, hidden_layers=0, act="silu")
 		self.ln2 = nn.LayerNorm(d_model)
 
 		self._update_edges = update_edges
 		if update_edges:
-			self.edge_mlp = MLP(d_in=3*d_model, d_hidden=d_model, d_out=d_model, num_hidden=2, act="silu")
+			self.edge_mlp = MLP(d_in=3*d_model, d_hidden=d_model, d_out=d_model, hidden_layers=2, act="silu")
 			self.edge_ln = nn.LayerNorm(d_model)
 
 	def forward(self, nodes, edges, nbrs, nbr_mask):
@@ -45,7 +45,7 @@ class MPNN(nn.Module):
 
 	def _node_msg(self, nodes, edges, nbrs, nbr_mask):
 
-		message = self._create_msg(nodes, edges, nbrs, nbr_mask)
+		message = self._create_msg(nodes, edges, nbrs)
 		nodes1 = torch.sum(self.node_mlp(message) * nbr_mask.unsqueeze(-1), dim=1)
 		nodes = self.ln1(nodes + nodes1)
 		nodes = self.ln2(self.ffn(nodes) + nodes)
@@ -62,7 +62,7 @@ class MPNN(nn.Module):
 	def _create_msg(self, nodes, edges, nbrs):
 		ZN, K, D = edges.shape
 		nodes_i = nodes.unsqueeze(1).expand(ZN, K, D)
-		nodes_j = torch.gather(nodes_i, 1, nbrs)
+		nodes_j = torch.gather(nodes_i, 1, nbrs.unsqueeze(-1).expand(ZN, K, D))
 		message = torch.cat([nodes_i, nodes_j, edges], dim=-1)
 		return message
 
@@ -73,6 +73,7 @@ class EdgeEncoder(nn.Module):
 
 		# rbf stuff (rbfs w/ linearly spaced centers of inter-residue backbone atom pairs)
 		min_rbf, max_rbf, num_rbf = 2.0, 22.0, 16
+		self.top_k = top_k
 		self.register_buffer("rbf_centers", torch.linspace(min_rbf, max_rbf, num_rbf))
 		self.spread = (max_rbf - min_rbf) / num_rbf
 		self.rbf_norm = nn.LayerNorm(num_rbf*4*4)
@@ -85,8 +86,8 @@ class EdgeEncoder(nn.Module):
 		self.seq_emb = nn.Embedding(66, d_model) # [-32,33] 33 is diff chains, 0 is self
 
 		# combine the rbf, frames, and seq emb into a single edge embedding
-		self.edge_mlp = MLP(d_in=d_model*3, d_out=d_model, d_hidden=d_model, hidden_layers=2, ac="silu")
-		self.edge_ln = nn.LayerNorm(d_model)
+		self.edge_mlp = MLP(d_in=d_model*3, d_out=d_model, d_hidden=d_model, hidden_layers=2, act="silu")
+		self.edge_ln = nn.LayerNorm(d_model*3)
 
 	def forward(self, coords_bb, frames, seq_pos, chain_pos, sample_idx):
 
@@ -102,7 +103,7 @@ class EdgeEncoder(nn.Module):
 		ZN, S = Ca.shape
 
 		# get distances
-		dists = torch.sqrt(torch.sum((Ca.unsqueeze(0) - Ca.unsqueeze(1))**2, dim=3)) # ZN x ZN
+		dists = torch.sqrt(torch.sum((Ca.unsqueeze(0) - Ca.unsqueeze(1))**2, dim=-1)) # ZN x ZN
 		
 		# sequences from other samples dont count
 		dists.masked_fill_(sample_idx.unsqueeze(0) != sample_idx.unsqueeze(1), float("inf")) # ZN x ZN
@@ -126,7 +127,7 @@ class EdgeEncoder(nn.Module):
 		rel_frames = self.frame_proj(self._get_frames(frames, nbrs))
 		rel_idxs = self.seq_emb(self._get_seq_pos(seq_pos, chain_pos, nbrs))
 
-		edges = self.edge_mlp(self.edge_ln(torch.cat([rel_rbf, rel_frames, rel_idxs], dim=3))) # Z,N,K,d_model
+		edges = self.edge_mlp(self.edge_ln(torch.cat([rel_rbf, rel_frames, rel_idxs], dim=-1))) # Z,N,K,d_model
 
 		return edges
 
@@ -182,7 +183,7 @@ class Transformer(nn.Module):
 		super().__init__()
 		self.attn = FlashMHA(d_model=d_model, heads=heads)
 		self.attn_norm = nn.LayerNorm(d_model)
-		self.ffn = MLP(d_in=d_model, d_hidden=4*d_model, d_out=d_model, num_hidden=0, act="silu")
+		self.ffn = MLP(d_in=d_model, d_hidden=4*d_model, d_out=d_model, hidden_layers=0, act="silu")
 		self.ffn_norm = nn.LayerNorm(d_model)
 
 	def forward(self, x, cu_seqlens, max_seqlen):
@@ -197,7 +198,7 @@ class PairwiseProjHead(nn.Module):
     def __init__(self, d_model=256, d_down=128, dist_bins=64, angle_bins=16):
         super().__init__()
         self.downsample = nn.Linear(d_model, d_down)
-        self.bin = MLP(d_in=2*d_down, d_hidden=dist_bins+angle_bins, d_out=dist_bins+angle_bins, num_hidden=1, act="silu")
+        self.bin = MLP(d_in=d_down, d_hidden=dist_bins+angle_bins, d_out=dist_bins+angle_bins, hidden_layers=1, act="silu")
         self._dist_bins = dist_bins
         self._angle_bins = angle_bins
 
@@ -207,5 +208,5 @@ class PairwiseProjHead(nn.Module):
         q_i, k_j = q.unsqueeze(0), k.unsqueeze(1)
         prod, diff = q_i*k_j, k_j-q_i
         pw = torch.cat([prod, diff], dim=-1) # ZN x ZN x D
-        distogram, anglogram = torch.chunk(self.bin(pw), chunks=[self._dist_bins, self._angle_bins], dim=-1)
+        distogram, anglogram = torch.split(self.bin(pw), [self._dist_bins, self._angle_bins], dim=-1)
         return distogram, anglogram

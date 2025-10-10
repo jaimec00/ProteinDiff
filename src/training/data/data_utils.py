@@ -155,7 +155,7 @@ class DataBatch:
 		self.homo_mask = torch.cat(homo_mask, dim=0)# ZN
 		
 		# other useful masks
-		self.coords_mask = self.atom_mask[:, :, :3].all(dim=2) # means not missing any bb coords, ZN
+		self.coords_mask = self.atom_mask[:, :3].all(dim=-1) # means not missing any bb coords, ZN
 		self.caa_mask = self.labels!=aa_2_lbl("X") # non canonical amino acids, ZN
 
 class PDBCache:

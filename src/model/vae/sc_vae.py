@@ -1,8 +1,10 @@
 
 import torch
 import torch.nn as nn
-from utils.model_utils.base_modules import ResNet
+from model.vae.vae_utils import ResNet
+from static.constants import canonical_aas
 import math
+
 
 class SideChainVAE(nn.Module):
 	def __init__(self, voxel_dim=16, d_model=256, d_latent=16, resnet_enc_layers=3, resnet_dec_layers=3, resnet_class_layers=3):
@@ -10,7 +12,7 @@ class SideChainVAE(nn.Module):
 
 		self.enc = SideChainEncoder(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_latent, resnet_layers=resnet_enc_layers)
 		self.dec = SideChainDecoder(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_latent, resnet_layers=resnet_dec_layers)
-		self.classifier = SideChainClassifier(voxel_dim=voxel_dims, d_model=d_model, resnet_layers=resnet_class_layers)
+		self.classifier = SideChainClassifier(voxel_dim=voxel_dim, d_model=d_model, resnet_layers=resnet_class_layers)
 
 	def forward(self, voxels):
 

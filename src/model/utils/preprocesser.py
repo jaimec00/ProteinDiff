@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from data.constants import amber_partial_charges, aa_2_lbl
+from static.constants import amber_partial_charges, aa_2_lbl
 from typing import Tuple
 
 class PreProcesser(nn.Module):
@@ -15,7 +15,7 @@ class PreProcesser(nn.Module):
 		voxel_z = torch.arange(z_cells).reshape(1,1,-1).expand(voxel_dims) - z_cells/2
 		voxel = cell_dim * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
 		self.register_buffer("voxel", voxel)
-		self.register_buffer("amber_partial_charges", amber_partial_charges)
+		self.register_buffer("amber_partial_charges", torch.from_numpy(amber_partial_charges).to(torch.float32))
 		self.res = cell_dim 
 
 	@torch.no_grad()
@@ -25,6 +25,7 @@ class PreProcesser(nn.Module):
 		L (torch.Tensor): amino acid class labels of shape (ZN)
 		atom_mask (torch.Tensor): mask indicating missing atom coordinates of shape (ZN,A)
 		'''
+
 
 		# get the backbone atoms, using virtual Cb
 		C_backbone = self.get_backbone(C) # ZN,4,3
@@ -98,7 +99,7 @@ class PreProcesser(nn.Module):
 	def compute_fields(self, C, L, voxels, atom_mask):
 
 		# prep
-		ZN = L.shape
+		ZN = L.size(0)
 		AA, A = self.amber_partial_charges.shape
 		_, Vx, Vy, Vz, S = voxels.shape
 		

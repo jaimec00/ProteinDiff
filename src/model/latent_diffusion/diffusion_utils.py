@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from utils.model_utils.base_modules import MLP, FlashMHA
+from model.utils.base_modules import MLP, FlashMHA
 import math 
 
 class NodeDenoiser(nn.Module):
