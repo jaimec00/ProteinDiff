@@ -53,7 +53,7 @@ class MLP(nn.Module):
 		return x
 
 class FlashMHA(nn.Module):
-	def __init__(self, d_model, heads):
+	def __init__(self, d_model=256, heads=8, dropout_p=0.0):
 		super().__init__()
 
 		d_k = d_model // heads
@@ -61,35 +61,27 @@ class FlashMHA(nn.Module):
 
 		self.qkv_proj = nn.Parameter(-xavier_scale + torch.rand(3, heads, d_model, d_k) * (2*xavier_scale)) # 3 x H x Dm x Dk
 		self.qkv_bias = nn.Parameter(torch.zeros(3, heads, d_k)) # 3 x H x Dk
-
 		self.out_proj = nn.Linear(d_model, d_model, bias=False)
+		self.dropout_p = dropout_p
 
-	def forward(self, x, mask):
+	def forward(self, x, cu_seqlens, max_seqlen):
 
 		# convenience
-		Z, N, Dm = x.shape
+		ZN, Dm = x.shape
 		_. H, _, Dk = self.qkv_proj.shape
 
-		# get indices of non pad positions
-		indices = mask.flatten().nonzero(as_tuple=False).flatten().reshape(-1,1,1,1).expand(-1,3,H,Dk)
-
 		# project the tensors
-		QKV = torch.matmul(x.reshape(Z,1,1,N,Dm), self.qkv_proj.reshape(1,3,H,Dm,Dk)) + self.qkv_bias.reshape(1,3,H,1,Dk) # Z,1,1,N,Dm@1,3,H,Dm,Dk + 1x3xHx1xDk->Z,3,H,N,Dk
+		QKV = torch.matmul(x.reshape(1,1,ZN,Dm), self.qkv_proj.reshape(3,H,Dm,Dk)) + self.qkv_bias.reshape(3,H,1,Dk) # 1,1,ZN,Dm@3,H,Dm,Dk + 3xHx1xDk->3,H,ZN,Dk
 
 		# reshape and use indices to unpad
-		QKV_unpad = QKV.permute(0,3,1,2,4).reshape(Z*N, 3, H, Dk).gather(0, indices).to(torch.float16).contiguous() # ZN(valid), 3, H, Dk
-
-		# compute cu seq lens and max seq len for kernel
-		seq_lens = mask.sum(dim=1) # Z, 
-		max_seqlen = seq_lens.max().item()  # 1,
-		cu_seqlens = F.pad(seq_lens.cumsum(dim=-1), (1,0)).to(torch.int32) # Z+1,
+		QKV = QKV.permute(2,0,1,3).to(torch.float16).contiguous() # ZN(valid), 3, H, Dk
 
 		# dropout if in training
 		dropout_p = self.dropout_p if self.training else 0.0
 
 		# flash attention 2
-		out_unpad = flash_attn_varlen_qkvpacked_func( # ZN(valid) x H x Dk
-			QKV_unpad,
+		out = flash_attn_varlen_qkvpacked_func( # ZN(valid) x H x Dk
+			QKV,
 			cu_seqlens, # q_cu_seqlens, k_cu_seqlens
 			max_seqlen, # q_max_seqlen, k_max_seqlen
 			dropout_p=dropout_p, # dropout
@@ -97,14 +89,8 @@ class FlashMHA(nn.Module):
 			deterministic=dropout_p>0.0 # for deterministic bwd, only when dropout is used
 		)
 
-		# init the output
-		out = torch.zeros(Z*N, H, Dk, device=x.device, dtype=x.dtype)
-
-		# scatter the unpadded output to the padded, and reshape
-		out = torch.scatter(out, 0, indices, out_unpad).reshape(Z, N, Dm) # reshapes to split Z and N, and cat heads to get Dm in one go
-
 		# output projection
-		out = self.out_proj(out)
+		out = self.out_proj(out.reshape(ZN, Dm))
 
 		return out
 

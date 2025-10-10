@@ -72,10 +72,11 @@ class Batch():
 		self.labels = data_batch.labels
 		self.seq_pos = data_batch.seq_pos
 		self.chain_pos = data_batch.chain_pos
+		self.sample_idx = data_batch.sample_idx
 
 		# define masks
 		self.atom_mask = data_batch.atom_mask
-		self.valid_mask = ~data_batch.pad_mask & data_batch.coords_mask & data_batch.seq_mask
+		self.valid_mask = data_batch.coords_mask & data_batch.seq_mask
 		self.loss_mask = self.valid_mask  & data_batch.canonical_seq_mask & data_batch.chain_mask
 
 		# other stuff

@@ -3,7 +3,7 @@ import torch.nn as nn
 from utils.model_utils.latent_diffusion.diffusion_utils import NodeDenoiser, CosineScheduler
 
 class Diffusion(nn.Module):
-	def __init__(self, d_model=256, d_sc_latent=16, d_bb_latent=256, layers=12, t_max=1000, top_k=16, parameterization="eps", min_rbf=2.0, max_rbf=22.0, num_rbf=16):
+	def __init__(self, d_model=256, d_sc_latent=16, d_bb_latent=256, layers=12, heads=8, t_max=1000, parameterization="eps"):
 		super().__init__()
 
 		self.d_sc_latent = d_sc_latent
@@ -15,26 +15,21 @@ class Diffusion(nn.Module):
 		self.denoiser = NodeDenoiser(d_model=d_model, layers=layers, heads=heads)
 		self.pred_proj = nn.Linear(d_model, d_sc_latent, bias=False)
 	
-	def forward(self, sc_latent, bb_latent, t, seq, valid_mask):
+	def forward(self, sc_latent, bb_latent, t, seq, cu_seqlens, max_seqlen):
 		
-		Z, N, d_sc_latent, Vx, Vy, Vz = sc_latent.shape
-		sc_latent = latent.reshape(Z, N, d_sc_latent)
+		return self.denoise(sc_latent, bb_latent, t, seq, cu_seqlens, max_seqlen)
 
-		pred = self.denoise(sc_latent, bb_latent).reshape(Z, N, d_sc_latent, Vx, Vy, Vz)
-		
-		return pred
-
-	def denoise(self, sc_latent, bb_latent, t, seq, valid_mask):
+	def denoise(self, sc_latent, bb_latent, t, seq, cu_seqlens, max_seqlen):
 		
 		latent = self.fuse_latents(sc_latent, bb_latent)
 		condition = self.featurize_condition(t, seq)
-		latent = self.denoiser(latent, condition, valid_mask)
+		latent = self.denoiser(latent, condition, cu_seqlens, max_seqlen)
 		pred = self.pred_proj(latent)
 
 		return pred
 
 	def noise(self, latent, t):
-		abars = self.noise_scheduler.get_abars(t).view(-1,1,1,1,1,1)
+		abars = self.noise_scheduler.get_abars(t).unsqueeze(-1)
 		noise = torch.randn_like(latent)
 		noised_latent = (abars**0.5)*latent + ((1 - abars)**0.5)*noise
 
@@ -48,36 +43,35 @@ class Diffusion(nn.Module):
 
 		return noised_latent, trgt
 
-	def generate(self, bb_latent, seq, valid_mask):
+	def generate(self, bb_latent, seq, cu_seqlens, max_seqlen, step_size=1):
 
 		# prep and start from white noise latents
-		Z, N = valid_mask.shape
-		sc_latent = torch.randn([Z, N, self.d_latent], device=bb_latent.device)
+		ZN = bb_latent.size(0)
+		device = bb_latent.device
+		sc_latent = torch.randn([ZN, self.d_latent], device=device)
 
 		# initialize t
-		t = torch.tensor([self.noise_scheduler.t_max-1], device=bb_latent.device)
+		t = torch.tensor([self.noise_scheduler.t_max-1], device=device)
 
 		while t.item() >= 0:
 			
 			# predict noise
-			pred = self.denoise(sc_latent, bb_latent, seq, t, valid_mask)
+			pred = self.denoise(sc_latent, bb_latent, seq, t, cu_seqlens, max_seqlen)
 
 			# remove noise
-			sc_latent = self.nudge(sc_latent, pred, t)
+			sc_latent = self.nudge(sc_latent, pred, t, step_size=step_size)
 
 			# next timestep
-			t = t - 1
+			t = t - step_size
 
-		sc_latent = sc_latent.reshape(Z, N, self.d_latent, 1,1,1)
+		return sc_latent
 
-		return latent
-
-	def nudge(self, latent, pred, t): 
+	def nudge(self, latent, pred, t, step_size=1): 
 		'''
 		uses DDIM
 		'''
 
-		abars = self.noise_scheduler.get_abars(t).view(-1, 1, 1)
+		abars = self.noise_scheduler.get_abars(t).reshape(-1, 1)
 		alphas = abars**0.5
 		sigmas = (1-abars)**0.5
 
@@ -91,13 +85,13 @@ class Diffusion(nn.Module):
 			x0 = (alphas*latent - sigmas*v_pred) /  (alphas**2 + sigmas**2)
 			eps_t = (sigmas*latent + alphas*v_pred) /  (alphas**2 + sigmas**2)
 
-		abars_tminus1 = self.noise_scheduler.get_abars(t-1).view(-1, 1, 1)
-		alphas_tminus1 = abars_tminus1**0.5
-		sigmas_tminus1 = (1-abars_tminus1)**0.5
+		abars_tminus_step = self.noise_scheduler.get_abars(max(0,t-step_size)).reshape(-1, 1)
+		alphas_tminus_step = abars_tminus_step**0.5
+		sigmas_tminus_step = (1-abars_tminus_step)**0.5
 
-		latent_tminus1 = alphas_tminus1*x0 + sigmas_tminus1*eps_t
+		latent_tminus_step = alphas_tminus_step*x0 + sigmas_tminus_step*eps_t
 
-		return latent_tminus1
+		return latent_tminus_step
 
 	def get_rand_t_for(self, x):
 		return torch.randint(0, self.noise_scheduler.t_max, (x.size(0),), device=x.device)
@@ -106,7 +100,7 @@ class Diffusion(nn.Module):
 		phase = self.t_wavenumbers.unsqueeze(0) * t.unsqueeze(1)
 		sines = torch.sin(phase)
 		cosines = torch.cos(phase)
-		t = torch.stack([sines, cosines], dim=2).reshape(t.size(0), 1, -1)
+		t = torch.stack([sines, cosines], dim=-1).reshape(t.size(0), -1)
 		seq = self.seq_emb(seq)
 		condition = self.conditioner(torch.cat([t, seq], dim=-1))
 		return condition

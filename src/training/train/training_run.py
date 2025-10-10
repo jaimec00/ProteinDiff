@@ -218,16 +218,10 @@ class TrainingRun:
 		runs testing and saves the model
 		'''
 
-		# load the data, note that all gpus are required to load all the data with the same random seeds, so they get unique data compared to other gpus each epoch
-		self.log("Loading Training Data...")
-		self.data.load("train")
-		self.log("Loading Validation Data...")
-		self.data.load("val")
-
 		# log training info
 		self.log(f"\n\nInitializing training. "\
 					f"Training on approx. {len(self.data.train)} batches "\
-					f"of batch size {self.data.batch_tokens} tokens "\
+					f"of batch size {len(self.data.train)} tokens "\
 					f"for {self.training_parameters.epochs} epochs.\n" 
 				)
 		

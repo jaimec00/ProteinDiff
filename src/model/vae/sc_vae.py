@@ -5,19 +5,25 @@ from utils.model_utils.base_modules import ResNet
 import math
 
 class SideChainVAE(nn.Module):
-	def __init__(self, voxel_dim=16, d_model=256, d_latent=16, resnet_layers=1):
+	def __init__(self, voxel_dim=16, d_model=256, d_latent=16, resnet_enc_layers=3, resnet_dec_layers=3, resnet_class_layers=3):
 		super().__init__()
 
-		self.enc = SideChainEncoder(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_latent, resnet_layers=resnet_layers)
-		self.dec = SideChainDecoder(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_latent, resnet_layers=resnet_layers)
-		self.classifier = SideChainClassifier(voxel_dim=voxel_dims, d_model=d_model, resnet_layers=class_layers)
+		self.enc = SideChainEncoder(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_latent, resnet_layers=resnet_enc_layers)
+		self.dec = SideChainDecoder(voxel_dim=voxel_dim, d_model=d_model, d_latent=d_latent, resnet_layers=resnet_dec_layers)
+		self.classifier = SideChainClassifier(voxel_dim=voxel_dims, d_model=d_model, resnet_layers=resnet_class_layers)
 
 	def forward(self, voxels):
-		latent, latent_mu, latent_logvar = self.enc(voxels)
-		voxels_pred = self.dec(latent)
-		seq = self.classifier(voxels_pred.detach())
 
-		return latent, latent_mu, latent_logvar, voxels_pred, seq
+		# get side chain latent
+		latent, latent_mu, latent_logvar = self.enc(voxels)
+
+		# reconstruct voxels
+		voxels_pred = self.dec(latent)
+
+		# predict seq from reconstructed voxels. detach dec output so classifier optimized independantly
+		seq_pred = self.classifier(voxels_pred.detach())
+
+		return latent, latent_mu, latent_logvar, voxels_pred, seq_pred
 
 class SideChainEncoder(nn.Module):
 	def __init__(self, voxel_dim=16, d_model=256, d_latent=16, resnet_layers=1):
@@ -48,13 +54,8 @@ class SideChainEncoder(nn.Module):
 
 	def forward(self, voxels):
 		'''
-		voxels (torch.Tensor): full voxels of each residue, of shape Z,N,1,Vx,Vy,Vz
+		voxels (torch.Tensor): full voxels of each residue, of shape ZN,1,Vx,Vy,Vz
 		'''
-
-		Z, N, Cin, Vx, Vy, Vz = voxels.shape 
-
-		# reshape to be compatible w/ torch convolutions
-		voxels = voxels.reshape(Z*N, Cin, Vx, Vy, Vz)
 
 		# add channels
 		features = self.featurizer(voxels)
@@ -64,10 +65,10 @@ class SideChainEncoder(nn.Module):
 			features = downsample(features)
 
 		# project to latent params
-		latent_params = self.latent_proj(features).reshape(Z, N, -1, 1, 1, 1)
+		latent_params = self.latent_proj(features)
 
 		# split into mu and logvar
-		latent_mu, latent_logvar = torch.chunk(latent_params, chunks=2, dim=2)
+		latent_mu, latent_logvar = torch.chunk(latent_params, chunks=2, dim=1)
 
 		# sample a latent
 		latent = latent_mu + torch.randn_like(latent_logvar)*torch.exp(0.5*latent_logvar)
@@ -103,13 +104,8 @@ class SideChainDecoder(nn.Module):
 
 	def forward(self, latent):
 		'''
-		latent (torch.Tensor): latent voxels of each residue, of shape Z,N,4,4,4,4
+		latent (torch.Tensor): latent voxels of each residue, of shape ZN,d_latent,1,1,1
 		'''
-
-		Z, N, Cin, Vx, Vy, Vz = latent.shape 
-
-		# reshape to be compatible w/ torch convolutions, no cross talk, so simply flattent the Z,N part,
-		latent = latent.reshape(Z*N, Cin, Vx, Vy, Vz)
 
 		features = self.featurizer(latent)
 
@@ -117,10 +113,6 @@ class SideChainDecoder(nn.Module):
 			features = upsample(features)
 
 		voxels = self.voxel_proj(features)
-
-		ZN, Cout, Vx, Vy, Vz = voxels.shape
-
-		voxels = voxels.reshape(Z, N, Cout, Vx, Vy, Vz)
 
 		return voxels
 
@@ -152,16 +144,16 @@ class SideChainClassifier(nn.Module):
 
 	def forward(self, voxels):
 
-		Z, N, Cin, Vx, Vy, Vz = voxels.shape
-		features = self.featurizer(voxels.reshape(Z*N, Cin, Vx, Vy, Vz))
+		ZN = voxels.size(0)
+		features = self.featurizer(voxels)
 
 		for downsample in self.downsamples:
 			features = downsample(features)
 
-		# output is Z*N, Cout, 1,1,1 so reshape to Z,N,Cout
-		features = features.reshape(Z, N, -1)
+		# output is Z*N, Cout, 1,1,1 so reshape to ZN,Cout
+		features = features.reshape(ZN, -1)
 
-		# project to amino acids, Z,N,20
+		# project to amino acids, ZN,20
 		aas = self.classify(features)
 
 		return aas

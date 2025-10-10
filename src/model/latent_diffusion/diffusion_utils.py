@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-from utils.model_utils.base_modules import MLP
-from data.constants import alphabet
+from utils.model_utils.base_modules import MLP, FlashMHA
 import math 
 
 class NodeDenoiser(nn.Module):
@@ -11,12 +10,12 @@ class NodeDenoiser(nn.Module):
 		# encoder
 		self.encs = nn.ModuleList([DiT(d_model=d_model, heads=heads) for _ in range(layers)])
 
-	def forward(self, latent, condition, valid_mask):
+	def forward(self, latent, condition, cu_seqlens, max_seqlen):
 
 		for enc in self.encs:
-			latent = enc(latent, condition, valid_mask)
+			latent = enc(latent, condition, cu_seqlens, max_seqlen)
 
-		return nodes
+		return latent
 
 class DiT(nn.Module):
 	def __init__(self, d_model=128, heads=4):
@@ -30,7 +29,7 @@ class DiT(nn.Module):
 
 		self.norm = StaticLayerNorm(d_model)
 
-	def forward(self, latent, condition, valid_mask):
+	def forward(self, latent, condition, cu_seqlens, max_seqlen):
 
 		# conditioning
 		alpha1, gamma1, beta1 = self.attn_norm(condition)
@@ -40,7 +39,7 @@ class DiT(nn.Module):
 		latent = gamma1*self.norm(latent) + beta1
 		
 		# attn
-		latent = latent + alpha1*self.attn(latent, valid_mask)
+		latent = latent + alpha1*self.attn(latent, cu_seqlens, max_seqlen)
 
 		# ffn
 		latent2 = gamma2*self.norm(latent) + beta2
@@ -67,8 +66,7 @@ class adaLN_Zero(nn.Module):
 		self.alpha = MLP(d_in=d_in, d_out=d_alpha, d_hidden=d_alpha, hidden_layers=1, dropout=0.0, act="silu", zeros=True)
 
 	def forward(self, x):
-		gamma_beta = self.gamma_beta(x)
-		gamma, beta = torch.chunk(gamma_beta, chunks=2, dim=-1)
+		gamma, beta = torch.chunk(self.gamma_beta(x), chunks=2, dim=-1)
 		alpha = self.alpha(x)
 		return gamma, beta, alpha
 

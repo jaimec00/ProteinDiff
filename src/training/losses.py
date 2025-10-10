@@ -25,9 +25,7 @@ class TrainingRunLosses():
 	def set_inference_losses(self, train_type):
 
 		# inference mode only applicable after train vae and diffusion
-		if train_type=="vae":
-			self.clear_tmp_losses() # vae evaluation is the same as training
-		elif train_type=="diffusion": # run full inference
+		if train_type=="diffusion": # run full inference
 			self.tmp.losses = {	"Cross Entropy Loss": [],
 								"Top 1 Accuracy": [],
 								"Top 3 Accuracy": [],
@@ -40,6 +38,8 @@ class TrainingRunLosses():
 									"Top 5 Accuracy": [],
 									"True AA Predicted Probability": []
 								}
+		else:
+			self.clear_tmp_losses() # (sc/bb)_vae evaluation is the same as training
 
 	def to_numpy(self):
 		self.train.to_numpy()
@@ -54,15 +54,25 @@ class Losses():
 
 		if train_type=="diffusion":
 			self.losses = {"Mean Squared Error": []}
-		elif train_type=="vae":
+		elif train_type=="sc_vae":
 			self.losses = {	
 							"Full Loss": [],
 							"Mean Squared Error": [],
 							"KL Divergence": [],
 							"Cross Entropy Loss": [],
-							"Top 1 Accuracy": [],
-							"Top 3 Accuracy": [],
-							"Top 5 Accuracy": [],
+							"Accuracy": [],
+							"True AA Predicted Probability": []
+						}
+		elif train_type=="bb_vae":
+			self.losses = {	
+							"Full Loss": [],
+							"KL Divergence": [],
+							"Distogram Cross Entropy Loss": [],
+							"Distogram Accuracy": [],
+							"Anglogram Cross Entropy Loss": [],
+							"Anglogram Accuracy": [],
+							"Sequence Cross Entropy Loss": [],
+							"Sequence Accuracy": [],
 							"True AA Predicted Probability": []
 						}
 

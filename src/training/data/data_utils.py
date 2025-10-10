@@ -118,37 +118,45 @@ class DataBatch:
 	def __init__(self, batch_list: List[Assembly]) -> None:
 		coords = []
 		labels = []
+
 		seq_pos = []
 		chain_pos = []
+		sample_idx = []
+
 		atom_mask = []
 		trgt_mask = []
 		homo_mask = []
 
-		for asmb in batch_list:
+		for idx, asmb in batch_list:
 			
 			asmb.construct() # materialize the full tensors (including AU copies)
 
 			coords.append(asmb.coords)
 			labels.append(asmb.labels)
+
 			seq_pos.append(asmb.seq_pos)
 			chain_pos.append(asmb.chain_pos)
+			sample_idx.append(torch.full(asmb.labels.shape, idx))
+
 			atom_mask.append(asmb.atom_mask)
 			trgt_mask.append(asmb.trgt_mask)
 			homo_mask.append(asmb.homo_mask)
 
-		# pad the tensors to max length
-		self.coords = pad_sequence(coords, batch_first=True, padding_value=0.0) # Z x N x 14 x 3
-		self.labels = pad_sequence(labels, batch_first=True, padding_value=-1) # Z x N
-		self.seq_pos = pad_sequence(seq_pos, batch_first=True, padding_value=0) # Z x N
-		self.chain_pos = pad_sequence(chain_pos, batch_first=True, padding_value=0) # Z x N
-		self.atom_mask = pad_sequence(atom_mask, batch_first=True, padding_value=False) # Z x N x 14
-		self.trgt_mask = pad_sequence(trgt_mask, batch_first=True, padding_value=False) # Z x N
-		self.homo_mask = pad_sequence(homo_mask, batch_first=True, padding_value=False) # Z x N
+		# no padding, just keep track of sample idxs
+		self.coords = torch.cat(coords, dim=0) # ZN x 14 x 3
+		self.labels = torch.cat(labels, dim=0) # ZN
+
+		self.seq_pos = torch.cat(seq_pos, dim=0)# ZN
+		self.chain_pos = torch.cat(chain_pos, dim=0)# ZN
+		self.sample_idx = torch.cat(sample_idx, dim=0) # ZN
+		
+		self.atom_mask = torch.cat(atom_mask, dim=0)# ZN x 14
+		self.trgt_mask = torch.cat(trgt_mask, dim=0)# ZN
+		self.homo_mask = torch.cat(homo_mask, dim=0)# ZN
 		
 		# other useful masks
-		self.coords_mask = self.atom_mask[:, :, :3].all(dim=2) # means not missing any bb coords, Z x N
-		self.ncaa_mask = self.labels==aa_2_lbl("X") # non canonical amino acids, Z x N
-		self.pad_mask = self.labels==-1 # padded positions, Z x N
+		self.coords_mask = self.atom_mask[:, :, :3].all(dim=2) # means not missing any bb coords, ZN
+		self.caa_mask = self.labels!=aa_2_lbl("X") # non canonical amino acids, ZN
 
 class PDBCache:
 	def __init__(self, 	pdb_path: Path, 
