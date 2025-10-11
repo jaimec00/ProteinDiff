@@ -158,6 +158,19 @@ class DataBatch:
 		self.coords_mask = self.atom_mask[:, :3].all(dim=-1) # means not missing any bb coords, ZN
 		self.caa_mask = self.labels!=aa_2_lbl("X") # non canonical amino acids, ZN
 
+	@torch.no_grad()
+	def apply_mask(self, mask: torch.Tensor) -> None:
+		self.coords = self.coords[mask, :, :]
+		self.labels = self.labels[mask]
+		self.seq_pos = self.seq_pos[mask]
+		self.chain_pos = self.chain_pos[mask]
+		self.sample_idx = self.sample_idx[mask]
+		self.atom_mask = self.atom_mask[mask, :]
+		self.trgt_mask = self.trgt_mask[mask]
+		self.homo_mask = self.homo_mask[mask]
+		self.coords_mask = self.coords_mask[mask]
+		self.caa_mask = self.caa_mask[mask]
+
 class PDBCache:
 	def __init__(self, 	pdb_path: Path, 
 						min_seq_size: int=16, max_seq_size: int=16384, 
