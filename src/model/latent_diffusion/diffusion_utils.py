@@ -32,8 +32,8 @@ class DiT(nn.Module):
 	def forward(self, latent, condition, cu_seqlens, max_seqlen):
 
 		# conditioning
-		alpha1, gamma1, beta1 = self.attn_norm(condition)
-		alpha2, gamma2, beta2 = self.ffn_norm(condition)
+		gamma1, beta1, alpha1 = self.attn_norm(condition)
+		gamma2, beta2, alpha2 = self.ffn_norm(condition)
 
 		# norm and conditioning
 		latent = gamma1*self.norm(latent) + beta1
@@ -46,17 +46,6 @@ class DiT(nn.Module):
 		latent = latent + alpha2*self.ffn(latent2)
 
 		return latent
-
-class FiLM(nn.Module):
-	def __init__(self, d_in=256, d_model=256):
-		super().__init__()
-		self.gamma_beta = MLP(d_in=d_in, d_out=2*d_model, d_hidden=d_model, hidden_layers=1, dropout=0.0, act="silu", zeros=False)
-		
-	def forward(self, x, condition):
-		gamma_beta = self.gamma_beta(condition)
-		gamma, beta = torch.chunk(gamma_beta, chunks=2, dim=-1)
-		x = gamma*x + beta
-		return x
 
 class adaLN_Zero(nn.Module):
 	'''adaptive layer norm to perform affine transformation conditioned on timestep and nodes. adaLNzero, where initialized to all zeros'''
