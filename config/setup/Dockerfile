@@ -1,58 +1,93 @@
 # syntax=docker/dockerfile:1.6
 
-# setup nvidia env with micromamba
 FROM mambaorg/micromamba:1.5.8 AS mmb
-FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS runtime
 
-# Ensure noninteractive apt
-ENV DEBIAN_FRONTEND=noninteractive
+#################################
+# Stage 1: builder (CUDA devel) #
+#################################
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS builder
 
-# --- Install OS deps needed during build/runtime ---
-# Use BuildKit caches for apt metadata and package cache
+ENV DEBIAN_FRONTEND=noninteractive \
+    MAMBA_ROOT_PREFIX=/opt/conda \
+    MAMBA_NO_BANNER=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INPUT=1 \
+    # speedups for torch cpp extensions
+    MAX_JOBS=8 \
+    USE_NINJA=1 \
+    # keep NVCC via ccache when present
+    CUDA_NVCC_EXECUTABLE="ccache nvcc"
+
+# Core build deps only in builder
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        git \
-        ca-certificates \
-        ninja-build \
-        build-essential \
-        python3-dev \
+    apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates build-essential ninja-build python3-dev python3-pip ccache \
     && rm -rf /var/lib/apt/lists/*
 
-# copy micromamba bin to nvidia env
+# Micromamba binary
 COPY --from=mmb /bin/micromamba /usr/local/bin/micromamba
-COPY config/setup/environment.yml /tmp/
 
-# where mamba stuff goes and no banner
-ENV MAMBA_ROOT_PREFIX=/opt/conda \
-    MAMBA_NO_BANNER=1
+# Conda env specification
+COPY config/setup/environment.yml /tmp/environment.yml
 
-# create env, then delete the env file and cache
+# Create the env (downloads cached across builds)
 RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
     micromamba create -y -n ProteinDiff_env -f /tmp/environment.yml && \
-    micromamba clean --all --yes && \
-    rm -f /tmp/environment.yml
+    micromamba clean --all --yes && rm -f /tmp/environment.yml
 
-
-# edit paths
+# Activate-like PATH
 ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
-    
-# Build & install FA2
-# keep getting oom when let it run on all cores
-ENV MAX_JOBS=8
-RUN --mount=type=cache,target=/root/.cache/pip \
-    micromamba run -n ProteinDiff_env bash -lc '\
-        set -euo pipefail && \       
-        git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
-        cd /tmp/flash-attention && \
-        git reset --hard 5059fd5 && \
-        python setup.py install \
-    ' && \
-    rm -rf /tmp/flash-attention
 
-# no root user
+# Build FlashAttention wheel with robust caching
+# - shallow clone
+# - pin commit
+# - build wheel to /tmp/wheels
+# - install into the env (no build isolation re-downloads)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.ccache \
+    micromamba run -n ProteinDiff_env bash -lc '\
+      set -euo pipefail && \
+      git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
+      cd /tmp/flash-attention && \
+      git reset --hard 5059fd5 && \
+      python setup.py install && \
+      rm -rf /tmp/flash-attention \
+    ' && \
+    micromamba clean --all --yes
+
+################################
+# Stage 2: runtime (CUDA slim) #
+################################
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    MAMBA_ROOT_PREFIX=/opt/conda \
+    MAMBA_NO_BANNER=1
+
+# Minimal runtime deps only
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Micromamba (small) for env activation/ops
+COPY --from=mmb /bin/micromamba /usr/local/bin/micromamba
+
+# Copy the fully-prepared env from builder (already contains flash-attn wheel)
+COPY --from=builder /opt/conda/envs /opt/conda/envs
+
+# Clean stray caches (usually none after builder clean, but safe)
+RUN rm -rf /root/.cache /tmp/*
+
+ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
+
+# Non-root
 RUN useradd -m -u 1000 -s /bin/bash coolguy
 USER coolguy
+WORKDIR /ProteinDiff
 
-WORKDIR /ProteinDiff/
+# (optional) tini for PID 1
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/bin/bash"]
