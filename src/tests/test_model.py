@@ -1,5 +1,6 @@
 import unittest
 from model.ProteinDiff import ProteinDiff
+from losses import LossFunction
 from static.constants import alphabet, canonical_aas
 import torch
 
@@ -35,6 +36,9 @@ class Tests(unittest.TestCase):
                                     bb_enc_layers=1, bb_dec_layers=1, bb_dec_heads=8,
                                     diff_layers=1, diff_heads=8, diff_parameterization="eps", t_max=10).to(self.device)
 
+        self.loss_func = LossFunction() # defaults
+        self.loss_mask = torch.rand((self.ZN,), device=device) < 0.0
+
     def test_sc_vae(self):
         latent_mu, latent_logvar, decoded_voxels, voxels, seq = self.run_model("sc_vae")
 
@@ -43,6 +47,8 @@ class Tests(unittest.TestCase):
         self.assertEqual((self.ZN,1,self.voxel_dim, self.voxel_dim, self.voxel_dim), decoded_voxels.shape)
         self.assertEqual((self.ZN,1,self.voxel_dim, self.voxel_dim, self.voxel_dim), voxels.shape)
         self.assertEqual((self.ZN,len(canonical_aas)), seq.shape)
+
+        losses = self.loss_func.sc_vae(latent_mu, latent_logvar, decoded_voxels, voxels, seq, self.labels, self.loss_mask)
 
     def test_bb_vae(self):
         latent_mu, latent_logvar, distogram, anglogram, seq_pred = self.run_model("bb_vae")
@@ -53,16 +59,22 @@ class Tests(unittest.TestCase):
         self.assertEqual((self.ZN,self.ZN,16), anglogram.shape) 
         self.assertEqual((self.ZN,len(canonical_aas)), seq_pred.shape)
 
+        losses = self.loss_func.bb_vae(latent_mu, latent_logvar, distogram, anglogram, self.coords, seq, self.labels, self.loss_mask)
+
     def test_diff(self):
         pred, target = self.run_model("diffusion")
 
         self.assertEqual((self.ZN, self.d_sc_latent), pred.shape)
         self.assertEqual((self.ZN, self.d_sc_latent), target.shape) 
 
+        losses = self.loss_func.diffusion(pred, target, self.loss_mask)
+
     def test_inference(self):
         seq = self.run_model("inference")
 
         self.assertEqual((self.ZN, len(canonical_aas)), seq.shape) 
+
+        losses = self.loss_func.inference(seq, self.labels, self.loss_mask)
 
     def run_model(self, run_type):
         return self.model(self.coords, self.labels, 

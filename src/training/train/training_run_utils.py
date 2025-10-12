@@ -67,15 +67,7 @@ class Epoch():
 class Batch():
 	def __init__(self, data_batch, b_idx=None, epoch=None, inference=False, temp=1e-6):
 
-		# data
-		self.coords = data_batch.coords 
-		self.labels = data_batch.labels
-		self.seq_pos = data_batch.seq_pos
-		self.chain_pos = data_batch.chain_pos
-		self.sample_idx = data_batch.sample_idx
-
-		# define masks
-		self.atom_mask = data_batch.atom_mask
+		# remove invalid
 		self.valid_mask = data_batch.coords_mask & data_batch.seq_mask
 		self.loss_mask = self.valid_mask  & data_batch.canonical_seq_mask & data_batch.chain_mask
 

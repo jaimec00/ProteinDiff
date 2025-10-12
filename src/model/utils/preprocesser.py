@@ -28,7 +28,7 @@ class PreProcesser(nn.Module):
 
 
 		# get the backbone atoms, using virtual Cb
-		C_backbone = self.get_backbone(C) # ZN,4,3
+		C_backbone = PreProcesser.get_backbone(C) # ZN,4,3
 
 		# compute unit vectors for each residue's local reference frame
 		local_origins, local_frames = self.compute_frames(C_backbone) # ZN,3 and ZN,3,3
@@ -45,7 +45,8 @@ class PreProcesser(nn.Module):
 
 		return C_backbone, divergence, local_frames
 
-	def get_backbone(self, C):
+	@staticmethod
+	def get_backbone(C):
 
 		n = C[:, 0, :]
 		ca = C[:, 1, :]
