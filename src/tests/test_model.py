@@ -60,7 +60,7 @@ class Tests(unittest.TestCase):
         self.assertEqual((self.ZN,self.ZN,16), anglogram.shape) 
         self.assertEqual((self.ZN,len(canonical_aas)), seq_pred.shape)
 
-        losses = self.loss_func.bb_vae(latent_mu, latent_logvar, distogram, anglogram, self.coords, seq_pred, self.labels, self.loss_mask)
+        losses = self.loss_func.bb_vae(latent_mu, latent_logvar, distogram, anglogram, self.coords, seq_pred, self.labels, self.sample_idx, self.loss_mask)
         losses["Full Loss"].backward()
 
     def test_diff(self):

@@ -177,10 +177,10 @@ class LossFunction:
 	def bb_vae(self, latent_mean: torch.Tensor, latent_logvar: torch.Tensor, 
 					distogram: torch.Tensor, anglogram: torch.Tensor, coords: torch.Tensor,
 					seq_pred: torch.Tensor, seq_true: torch.Tensor, 
-					mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+					sample_idx: torch.Tensor, mask: torch.Tensor) -> Dict[str, torch.Tensor]:
 
 		kl_div = self._kl_div(latent_mean, latent_logvar, mask)
-		dist_loss, angle_loss = self._struct_cel(distogram, anglogram, coords, mask)
+		dist_loss, angle_loss = self._struct_cel(distogram, anglogram, coords, sample_idx, mask)
 		seq_loss = self._seq_cel(seq_pred, seq_true, mask, mode="bb")
 		matches = self._compute_matches(seq_pred, seq_true, mask)
 		probs = self._compute_probs(seq_pred, seq_true, mask)
@@ -238,13 +238,13 @@ class LossFunction:
 		cel = criteria(seq_pred, seq_true)
 		return cel
 
-	def _struct_cel(self, distogram: torch.Tensor, anglogram: torch.Tensor, coords: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor]:
+	def _struct_cel(self, distogram: torch.Tensor, anglogram: torch.Tensor, coords: torch.Tensor, sample_idx: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor]:
 		
 		# get Cb position and CaCb unit vec
 		Cb, CaCb = self._get_Cb_and_CaCb(coords)
 
 		# get ZN,ZN pairwise mask
-		pw_mask = self._get_pw_mask(mask)
+		pw_mask = self._get_pw_mask(mask, sample_idx)
 
 		# distogram loss
 		dist_loss = self._dist_cel(distogram, Cb, pw_mask)
@@ -267,8 +267,8 @@ class LossFunction:
 
 		return Cb, CaCb
 
-	def _get_pw_mask(self, mask: torch.Tensor) -> torch.Tensor:
-		return mask.unsqueeze(0) & mask.unsqueeze(1)
+	def _get_pw_mask(self, mask: torch.Tensor, sample_idx: torch.Tensor) -> torch.Tensor:
+		return (mask.unsqueeze(0) & mask.unsqueeze(1)) & (sample_idx.unsqueeze(0) == sample_idx.unsqueeze(1))
 
 	def _dist_cel(self, distogram, Cb, mask):
 		dist_bins = distogram.size(-1)
