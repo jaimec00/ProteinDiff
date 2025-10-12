@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +7,7 @@ from torch.nn import CrossEntropyLoss
 import numpy as np
 import math
 from static.constants import canonical_aas
-from typing import Dict
+from typing import Dict, List
 from model.utils.preprocesser import PreProcesser
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -79,11 +81,11 @@ class Losses:
 							
 							"Distogram Cross Entropy Loss": [],
 							"Distogram Accuracy": [],
-							"True DistBin Predicted Probability": []
+							"True DistBin Predicted Probability": [],
 							
 							"Anglogram Cross Entropy Loss": [],
 							"Anglogram Accuracy": [],
-							"True AngleBin Predicted Probability": []
+							"True AngleBin Predicted Probability": [],
 							
 							"Sequence Cross Entropy Loss": [],
 							"Sequence Accuracy": [],
@@ -203,9 +205,9 @@ class LossFunction:
 		return losses
 
 	def inference(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		cel = self.cel(seq_pred, seq_true, mask)
-		matches = self.compute_matches(seq_pred, seq_true, mask)
-		probs = self.compute_probs(seq_pred, seq_true, mask)
+		cel = self._seq_cel(seq_pred, seq_true, mask)
+		matches = self._compute_matches(seq_pred, seq_true, mask)
+		probs = self._compute_probs(seq_pred, seq_true, mask)
 
 		losses = {	"Cross Entropy Loss": cel,					
 					"Accuracy": matches,
@@ -296,7 +298,7 @@ class LossFunction:
 		angle_bins = torch.linspace(-1, 1, bins, device=CaCb.device) # bins,
 
 		# compute true distances
-		true_angles = torch.linalg.vecdot(CaCb.unsqueeze(1), CbCb.unsqueeze(0), dim=-1) # ZN, ZN
+		true_angles = torch.linalg.vecdot(CaCb.unsqueeze(1), CaCb.unsqueeze(0), dim=-1) # ZN, ZN
 
 		return self._get_lbl(true_angles, angle_bins, mask)
 
@@ -319,10 +321,10 @@ class LossFunction:
 			case "-": raise ValueError(f"mode must be one of [dist, angle], not {mode}")
 
 		# compute cel, no reduction
-		cel = criteria(pred.reshape(-1, pred.size(-1)), true_lbl.reshape(-1)).reshape(pred.shape[:-1]) # ZN,ZN
+		cel = criteria(pred.reshape(-1, pred.size(-1)), true.reshape(-1)).reshape(pred.shape[:-1]) # ZN,ZN
 
 		# get average for each token
-		cel = cel.sum(dim=-1) / valid.sum(dim=-1).clamp(min=1) # ZN,
+		cel = cel.sum(dim=-1) / mask.sum(dim=-1).clamp(min=1) # ZN,
 
 		# sum the averages
 		return cel.sum()
@@ -333,5 +335,5 @@ class LossFunction:
 
 	def _compute_probs(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 		probs = torch.softmax(seq_pred, dim=-1)
-		probs_sum = (mask.unsqueeze(-1)*torch.gather(probs, 2, (seq_true*mask).unsqueeze(2))).sum()
+		probs_sum = (mask.unsqueeze(-1)*torch.gather(probs, -1, (seq_true*mask).unsqueeze(-1))).sum()
 		return probs_sum

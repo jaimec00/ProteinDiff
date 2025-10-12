@@ -1,6 +1,6 @@
 import unittest
 from model.ProteinDiff import ProteinDiff
-from losses import LossFunction
+from training.losses import LossFunction
 from static.constants import alphabet, canonical_aas
 import torch
 
@@ -15,7 +15,7 @@ class Tests(unittest.TestCase):
         self.labels = torch.randint(0,len(alphabet),(self.ZN,), dtype=torch.long, device=self.device)
         self.seq_pos = torch.arange(self.ZN, device=self.device)
         self.chain_pos = torch.ones(self.ZN, device=self.device)
-        self.atom_mask = torch.rand((self.ZN,14), device=self.device)<0.0 
+        self.atom_mask = torch.rand((self.ZN,14), device=self.device)>0.0 
         self.no_seq_mask = torch.zeros(self.ZN, device=self.device, dtype=torch.bool)
         self.sample_idx = torch.ones(self.ZN, device=self.device)
 
@@ -37,7 +37,7 @@ class Tests(unittest.TestCase):
                                     diff_layers=1, diff_heads=8, diff_parameterization="eps", t_max=10).to(self.device)
 
         self.loss_func = LossFunction() # defaults
-        self.loss_mask = torch.rand((self.ZN,), device=device) < 0.0
+        self.loss_mask = self.labels < len(canonical_aas)
 
     def test_sc_vae(self):
         latent_mu, latent_logvar, decoded_voxels, voxels, seq = self.run_model("sc_vae")
@@ -49,6 +49,7 @@ class Tests(unittest.TestCase):
         self.assertEqual((self.ZN,len(canonical_aas)), seq.shape)
 
         losses = self.loss_func.sc_vae(latent_mu, latent_logvar, decoded_voxels, voxels, seq, self.labels, self.loss_mask)
+        losses["Full Loss"].backward()
 
     def test_bb_vae(self):
         latent_mu, latent_logvar, distogram, anglogram, seq_pred = self.run_model("bb_vae")
@@ -59,7 +60,8 @@ class Tests(unittest.TestCase):
         self.assertEqual((self.ZN,self.ZN,16), anglogram.shape) 
         self.assertEqual((self.ZN,len(canonical_aas)), seq_pred.shape)
 
-        losses = self.loss_func.bb_vae(latent_mu, latent_logvar, distogram, anglogram, self.coords, seq, self.labels, self.loss_mask)
+        losses = self.loss_func.bb_vae(latent_mu, latent_logvar, distogram, anglogram, self.coords, seq_pred, self.labels, self.loss_mask)
+        losses["Full Loss"].backward()
 
     def test_diff(self):
         pred, target = self.run_model("diffusion")
@@ -68,6 +70,7 @@ class Tests(unittest.TestCase):
         self.assertEqual((self.ZN, self.d_sc_latent), target.shape) 
 
         losses = self.loss_func.diffusion(pred, target, self.loss_mask)
+        losses["Mean Squared Error"].backward()
 
     def test_inference(self):
         seq = self.run_model("inference")
