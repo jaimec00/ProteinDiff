@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from static.constants import amber_partial_charges, aa_2_lbl
 from typing import Tuple
 
@@ -54,7 +55,7 @@ class PreProcesser(nn.Module):
 
 		b1 = ca - n
 		b2 = c - ca
-		b3 = torch.linalg.cross(b1, b2, dim=1)
+		b3 = torch.linalg.cross(b1, b2, dim=-1)
 
 		cb = ca - 0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
 
@@ -62,24 +63,28 @@ class PreProcesser(nn.Module):
 
 		return C_backbone
 
+	def _norm(self, vec):
+		return F.normalize(vec, p=2, dim=-1, eps=1e-8)
+
 	def compute_frames(self, C_backbone):
 
-		y = C_backbone[:, 3, :] - C_backbone[:, 1, :] # Cb - Ca
-		y_unit = y / torch.linalg.vector_norm(y, dim=1, keepdim=True).clamp(min=1e-6)
+		# split the backbone atoms
+		n, ca, c, cb = torch.chunk(C_backbone, dim=1, chunks=4)
 
-		x_raw = C_backbone[:, 2, :] - C_backbone[:, 0, :] # C - N
-		x_proj = torch.linalg.vecdot(x_raw, y_unit, dim=1) # project x_raw onto y
-		x = x_raw - x_proj.unsqueeze(1) # subtract the projection from the original vector to get the projection of x onto the plane perpendicular to y
-		x_unit = x / torch.linalg.vector_norm(x, dim=1, keepdim=True).clamp(min=1e-6)
+		# compute y
+		y = self._norm(cb-ca)
 
-		# already a unit vector, since x and y are already unit, but norm in case of numerical precision
-		z = torch.linalg.cross(x_unit, y_unit) 
-		z_unit = z / torch.linalg.vector_norm(z, dim=1, keepdim=True).clamp(min=1e-6)
+		# x is c-n projected onto the plane normal to y
+		x = self._norm(c-n - y*torch.linalg.vecdot(c-n, y, dim=-1).unsqueeze(-1))
 
-		frames = torch.stack([x_unit, y_unit, z_unit], dim=1) # ZN,U,S
+		# z is cross product of the two
+		z = self._norm(torch.linalg.cross(x, y, dim=-1))
+
+		# get the frames
+		frames = torch.cat([x,y,z], dim=1) # ZN,U,S
 
 		# the origin is the beta carbon position
-		origin = C_backbone[:, 3, :]
+		origin = cb.squeeze(1) # ZN, S
 
 		return origin, frames
 
