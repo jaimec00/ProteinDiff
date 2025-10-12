@@ -62,7 +62,7 @@ class MPNN(nn.Module):
 	def _create_msg(self, nodes, edges, nbrs):
 		ZN, K, D = edges.shape
 		nodes_i = nodes.unsqueeze(1).expand(ZN, K, D)
-		nodes_j = torch.gather(nodes_i, 1, nbrs.unsqueeze(-1).expand(ZN, K, D))
+		nodes_j = torch.gather(nodes_i, 0, nbrs.unsqueeze(-1).expand(ZN, K, D))
 		message = torch.cat([nodes_i, nodes_j, edges], dim=-1)
 		return message
 
@@ -112,7 +112,7 @@ class EdgeEncoder(nn.Module):
 		nbrs = dists.topk(self.top_k, dim=1, largest=False) # ZN x K
 
 		# some samples might have less than K tokens, so create a nbr mask
-		nbr_sample_idxs = torch.gather(sample_idx.unsqueeze(1).expand(-1,self.top_k), 1, nbrs.indices)
+		nbr_sample_idxs = torch.gather(sample_idx.unsqueeze(1).expand(-1,self.top_k), 0, nbrs.indices)
 		nbr_mask = nbr_sample_idxs == sample_idx.unsqueeze(1)
 
 		# masked edge idxs are the idx corresponding to the self node
@@ -137,7 +137,7 @@ class EdgeEncoder(nn.Module):
 		ZN, A, S = C_backbone.shape
 		_, K = nbrs.shape
 
-		C_nbrs = torch.gather(C_backbone.unsqueeze(1).expand(ZN, K, A, S), 1, nbrs.reshape(ZN,K,1,1).expand(ZN, K, A, S)) # ZN,K,A,S
+		C_nbrs = torch.gather(C_backbone.unsqueeze(1).expand(ZN, K, A, S), 0, nbrs.reshape(ZN,K,1,1).expand(ZN, K, A, S)) # ZN,K,A,S
 
 		dists = torch.sqrt(torch.sum((C_backbone.reshape(ZN,1,A,1,S) - C_nbrs.reshape(ZN,K,1,A,S))**2, dim=-1)) # ZN,1,A,1,S - ZN,K,1,A,S --> ZN,K,A,A
 
@@ -155,7 +155,7 @@ class EdgeEncoder(nn.Module):
 		frames = frames.unsqueeze(1).expand(ZN, K, 3, 3)
 		nbrs = nbrs.reshape(ZN, K, 1, 1).expand(ZN, K, 3, 3)
 		
-		frame_nbrs = torch.gather(frames, 1, nbrs)
+		frame_nbrs = torch.gather(frames, 0, nbrs)
 		rel_frames = torch.matmul(frames.transpose(-2,-1), frame_nbrs).reshape(ZN, K, -1)
 
 		return rel_frames
@@ -166,10 +166,10 @@ class EdgeEncoder(nn.Module):
 		ZN, K = nbrs.shape
 
 		seq_pos = seq_pos.unsqueeze(1).expand(ZN, K)		
-		seq_nbrs = torch.gather(seq_pos, 1, nbrs) # ZN,K
+		seq_nbrs = torch.gather(seq_pos, 0, nbrs) # ZN,K
 
 		chain_pos = chain_pos.unsqueeze(1).expand(ZN, K)
-		chain_nbrs = torch.gather(chain_pos, 1, nbrs) # ZN,K
+		chain_nbrs = torch.gather(chain_pos, 0, nbrs) # ZN,K
 		diff_chain = chain_pos!=chain_nbrs
 
 		rel_idx = torch.clamp(seq_nbrs - seq_pos, min=-32, max=32)
@@ -203,7 +203,7 @@ class PairwiseProjHead(nn.Module):
         self._angle_bins = angle_bins
 
     def forward(self, x):
-
+		# this will turn into a triton kernel soon, and then a cuda kernel
         q, k = torch.chunk(self.downsample(x), chunks=2, dim=-1) # ZN x D//2
         q_i, k_j = q.unsqueeze(0), k.unsqueeze(1)
         prod, diff = q_i*k_j, k_j-q_i
