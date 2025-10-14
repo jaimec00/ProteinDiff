@@ -7,16 +7,13 @@ x-common: &common
   volumes: # mounts
     - ${PWD}/src:/ProteinDiff/src # source code
     - ${PWD}/config/train.yml:/ProteinDiff/config/train.yml # training config
-
-    # --------------- EDIT ---------------
-    - ${PWD}/../pdb_2021aug02_sample:/mnt/data:ro # data
-    - ${PWD}/../experiments:/mnt/experiments # training experiments
-    # ------------------------------------
+    - ${DATA_PATH}:/mnt/data:ro # data
+    - ${EXP_PATH}:/mnt/experiments # training experiments
 
   environment:
-    DATA_DIR: /mnt/data
-    EXP_DIR: /mnt/outputs
-    PYTHONPATH: "/ProteinDiff/src:${PYTHONPATH}"
+    DATA_PATH: /mnt/data
+    EXP_PATH: /mnt/experiments
+    PYTHONPATH: "/ProteinDiff/src"
 
 
 services:

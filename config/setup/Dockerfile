@@ -34,16 +34,13 @@ COPY config/setup/environment.yml /tmp/environment.yml
 # Create the env (downloads cached across builds)
 RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
     micromamba create -y -n ProteinDiff_env -f /tmp/environment.yml && \
-    micromamba clean --all --yes && rm -f /tmp/environment.yml
+    micromamba clean --all --yes && \
+    rm -f /tmp/environment.yml
 
 # Activate-like PATH
 ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
 
 # Build FlashAttention wheel with robust caching
-# - shallow clone
-# - pin commit
-# - build wheel to /tmp/wheels
-# - install into the env (no build isolation re-downloads)
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.ccache \
     micromamba run -n ProteinDiff_env bash -lc '\
@@ -81,6 +78,7 @@ COPY --from=builder /opt/conda/envs /opt/conda/envs
 # Clean stray caches (usually none after builder clean, but safe)
 RUN rm -rf /root/.cache /tmp/*
 
+# add to path
 ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
 
 # Non-root
