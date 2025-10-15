@@ -7,19 +7,30 @@ ProteinDiff is a latent diffusion model for protein sequence generation given a 
 
 Thus far, I am still working on setting up the model architecture and training logic. Once this is done, I will move on to making the model scalable by adding hybrid parallelism (FSDP, PP, TP). For now, here is how to setup the environment to develop.
 
-First you need to build the image. Make sure you have docker installed on your machine, and that you have gpus on your machine (in the process of developing some custom cuda kernels)
+
+First, you need to pull the image. I pushed a docker image that works on sm80, you can pull it like this
+
+```shell
+# pull
+sudo docker pull jaimec00/proteindiff:cu12.8-sm80
+
+# change the tag so it matches what docker compose expects
+sudo docker tag jaimec00/proteindiff:cu12.8-sm80 proteindiff:dev
+```
+
+I have not tried sm90, but you can try building it on a node with hopper gpus:
 
 ```shell
 sudo docker build -t proteindiff:dev -f config/setup/Dockerfile .
 ```
 
-Once the image is built, you can use docker compose to run a shell in the environment (debug service) or to directly train the model (train service).
+Once the image is pulled/built, you can run this helper script to run a shell in the environment (debug service) or to directly train the model (train service). the helper script is running docker compose under the hood.
 
 ```shell
-sudo docker compose -f config/setup/docker-compose.yml run --rm <debug,train>
+./config/setup/start.sh <train/debug>
 ```
 
-You may also want to download the training data. as of right now, I am using the dataset curated for ProteinMPNN. In the future, I will make my own dataset which will include sample from PDB, AFDB, and ESMAtlas. here is how to download the PMPNN dataset (do this BEFORE running <docker compose ...>):
+You may also want to download the training data. as of right now, I am using the dataset curated for ProteinMPNN. In the future, I will make my own dataset which will include sample from PDB, AFDB, and ESMAtlas. here is how to download the PMPNN dataset (do this BEFORE running start.sh):
 
 ```shell
 DATA_PATH=/PATH/TO/YOUR/DATA && \
@@ -28,7 +39,13 @@ tar -xzf $DATA_PATH/pdb_2021aug02.tar.gz -C $DATA_PATH && \
 rm $DATA_PATH/pdb_2021aug02.tar.gz
 ```
 
-Then make sure to update the config/setup/docker-compose.yml file to reflect the path to your data
+make sure to edit the ```config/setup/.env``` file so that it matches the path to the data, as docker compose reads this to mount the volumes.
+
+```
+# .env
+DATA_PATH=/path/to/data
+EXP_PATH=/path/where/experiments/are/written/to
+```
 
 ## Architecture
 Here is a summary of the idea in broad strokes:
