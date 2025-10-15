@@ -171,6 +171,14 @@ class DataBatch:
 		self.coords_mask = self.coords_mask[mask]
 		self.caa_mask = self.caa_mask[mask]
 
+	def get_cu_seqlens(self):
+        _, seqlens = torch.unique_consecutive(self.sample_idx, return_counts=True)
+        self.cu_seqlens = torch.nn.functional.pad(seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
+        self.max_seqlen = seqlens.max(dim=0).values.item()
+
+	def __len__(self):
+		return self.labels.size(0)
+
 class PDBCache:
 	def __init__(self, 	pdb_path: Path, 
 						min_seq_size: int=16, max_seq_size: int=16384, 
