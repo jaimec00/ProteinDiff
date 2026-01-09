@@ -1,0 +1,62 @@
+[project]
+name = "ProteinDiff"
+version = "0.1.0"
+description = "Multimodal protein generative model using Mixture of Queries and latent diffusion"
+channels = ["pytorch", "nvidia", "bioconda", "conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+# Training tasks
+train = "python src/training/train/train.py --config config/train.yml"
+train-vae = "python src/training/train/train.py --config config/train.yml --training_parameters.train_type vae"
+train-diffusion = "python src/training/train/train.py --config config/train.yml --training_parameters.train_type diffusion"
+
+# Testing tasks
+test = "pytest src/tests/"
+test-verbose = "pytest src/tests/ -v"
+
+# Development tasks
+shell = "bash"
+
+[dependencies]
+python = ">=3.9"
+pytorch = "2.5.1"
+pip = "*"
+numpy = "*"
+pandas = "*"
+requests = "*"
+pathlib = "*"
+biopython = "1.84"
+tqdm = "*"
+matplotlib = "*"
+plotly = "*"
+python-box = "*"
+
+# Development dependencies
+pytest = "*"
+
+[pypi-dependencies]
+ninja = "*"
+# Note: FlashAttention needs to be installed manually or via custom build
+# flash-attn = { git = "https://github.com/Dao-AILab/flash-attention.git", rev = "5059fd5" }
+
+[feature.cuda]
+channels = ["pytorch", "nvidia", "bioconda", "conda-forge"]
+platforms = ["linux-64"]
+
+[feature.cuda.dependencies]
+pytorch-cuda = "12.8"
+
+[feature.cuda.tasks]
+# Build FlashAttention from source (requires CUDA development tools)
+build-flash-attn = """
+git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
+cd /tmp/flash-attention && \
+git reset --hard 5059fd5 && \
+python setup.py install && \
+rm -rf /tmp/flash-attention
+"""
+
+[environments]
+default = { solve-group = "default" }
+cuda = { features = ["cuda"], solve-group = "default" }

@@ -1,57 +1,53 @@
 # syntax=docker/dockerfile:1.6
 
-FROM mambaorg/micromamba:1.5.8 AS mmb
-
 #################################
 # Stage 1: builder (CUDA devel) #
 #################################
 FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    MAMBA_ROOT_PREFIX=/opt/conda \
-    MAMBA_NO_BANNER=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_INPUT=1 \
     # speedups for torch cpp extensions
     MAX_JOBS=8 \
     USE_NINJA=1 \
     # keep NVCC via ccache when present
-    CUDA_NVCC_EXECUTABLE="ccache nvcc"
+    CUDA_NVCC_EXECUTABLE="ccache nvcc" \
+    # Pixi settings
+    PIXI_HOME=/opt/pixi \
+    PIXI_NO_PATH_UPDATE=1
 
 # Core build deps only in builder
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates build-essential ninja-build python3-dev python3-pip ccache \
+      git ca-certificates build-essential ninja-build ccache curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Micromamba binary
-COPY --from=mmb /bin/micromamba /usr/local/bin/micromamba
+# Install pixi
+RUN curl -fsSL https://pixi.sh/install.sh | bash && \
+    ln -s /root/.pixi/bin/pixi /usr/local/bin/pixi
 
-# Conda env specification
-COPY config/setup/environment.yml /tmp/environment.yml
+# Copy pixi configuration
+COPY pixi.toml /tmp/ProteinDiff/pixi.toml
 
-# Create the env (downloads cached across builds)
-RUN --mount=type=cache,target=/opt/conda/pkgs,sharing=locked \
-    micromamba create -y -n ProteinDiff_env -f /tmp/environment.yml && \
-    micromamba clean --all --yes && \
-    rm -f /tmp/environment.yml
-
-# Activate-like PATH
-ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
+# Install dependencies with pixi (using cuda environment)
+WORKDIR /tmp/ProteinDiff
+RUN --mount=type=cache,target=/root/.cache/rattler,sharing=locked \
+    pixi install --environment cuda && \
+    pixi clean cache --yes
 
 # Build FlashAttention wheel with robust caching
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.ccache \
-    micromamba run -n ProteinDiff_env bash -lc '\
+    pixi run --environment cuda bash -c '\
       set -euo pipefail && \
       git clone https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
       cd /tmp/flash-attention && \
       git reset --hard 5059fd5 && \
       python setup.py install && \
       rm -rf /tmp/flash-attention \
-    ' && \
-    micromamba clean --all --yes
+    '
 
 ################################
 # Stage 2: runtime (CUDA slim) #
@@ -59,30 +55,34 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    MAMBA_ROOT_PREFIX=/opt/conda \
-    MAMBA_NO_BANNER=1
+    PIXI_HOME=/opt/pixi \
+    PIXI_NO_PATH_UPDATE=1
 
 # Minimal runtime deps only
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tini \
+      ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Micromamba (small) for env activation/ops
-COPY --from=mmb /bin/micromamba /usr/local/bin/micromamba
+# Install pixi
+RUN curl -fsSL https://pixi.sh/install.sh | bash && \
+    ln -s /root/.pixi/bin/pixi /usr/local/bin/pixi
 
-# Copy the fully-prepared env from builder (already contains flash-attn wheel)
-COPY --from=builder /opt/conda/envs /opt/conda/envs
+# Copy the pixi environment from builder
+COPY --from=builder /tmp/ProteinDiff/.pixi /opt/ProteinDiff/.pixi
+COPY --from=builder /tmp/ProteinDiff/pixi.toml /opt/ProteinDiff/pixi.toml
+COPY --from=builder /tmp/ProteinDiff/pixi.lock /opt/ProteinDiff/pixi.lock
 
 # Clean stray caches (usually none after builder clean, but safe)
 RUN rm -rf /root/.cache /tmp/*
 
-# add to path
-ENV PATH=/opt/conda/envs/ProteinDiff_env/bin:$PATH
+# Set up environment activation
+ENV PATH="/opt/ProteinDiff/.pixi/envs/cuda/bin:$PATH"
 
 # Non-root
-RUN useradd -m -u 1000 -s /bin/bash coolguy
+RUN useradd -m -u 1000 -s /bin/bash coolguy && \
+    chown -R coolguy:coolguy /opt/ProteinDiff
 USER coolguy
 WORKDIR /ProteinDiff
 
