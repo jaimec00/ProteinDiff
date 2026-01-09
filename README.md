@@ -1,7 +1,20 @@
-# ProteinDiff - Structure-Conditioned Latent Diffusion
-## Summary
 
-ProteinDiff is a latent diffusion model for protein sequence generation given a target backbone structure. It aims to provide a truly generative model for this problem, by reframing it in such a way that the main diffusion model can learn the score of sequence space given a target structure. 
+# Multimodal Protein Model with Mixture of Queries (MoQ)
+
+## Project Overview
+
+This is a **multimodal protein generative model** that understands and generates proteins conditioned on partial sequence and/or partial structure. Unlike the current ProteinDiff architecture, this model uses **Mixture of Queries (MoQ)** to compress variable-length protein representations into fixed-size latent vectors, enabling:
+
+- **Stable latent diffusion** on fixed-size representations
+- **Faster training** due to fixed latent dimensionality
+- **Latent interpolation** between known proteins for generation
+- **Flexible conditioning** on any combination of partial sequence/structure
+
+**Key Innovation**: MoQ routing selects a fixed number of learnable query vectors that compress variable-length protein embeddings via cross-attention, creating a bottleneck that forces the model to learn compact, information-rich representations.
+
+**Current Status**: Architecture design phase. Will reuse preprocessing (voxelization/divergence) from ProteinDiff but implement new encoder/decoder/conditioning networks.
+
+---
 
 ## Setup
 
@@ -47,69 +60,360 @@ DATA_PATH=/path/to/data
 EXP_PATH=/path/where/experiments/are/written/to
 ```
 
-## Architecture
-Here is a summary of the idea in broad strokes:
+## Architecture Components
 
-There are three stages for training the model:
-1. SideChain VAE
-2. BackBone VAE
-3. Latent Diffusion
+### 1. VAE Encoder
 
-We will cover the training for each stage, before explaining how it works in inference.
+**Input**: Full atomic coordinates `(ZN, 14, 3)` + amino acid labels
 
-### Side Chain VAE
-What makes this architecture unique is how it frames the problem of inverse folding (IF) to take advantage of the atomic data available. Most IF models are trained by processing the backbone structure (usually via graphs or attention) and to predict the correct amino acid out of 20 possibilities. This turns the problem into a classification task, which is typically simpler for AI models, but at the same time wastes very useful atomic information that the model might be able to leverage during training. Thus, I propose having the model perform diffusion over the side chain environments, allowing the model to use the diverse side chain rotamers available from the PDB/AFDB. This is easier said than done, because it must take into account the variable number of atoms of each residue, and must perform diffusion over a 3D data space, which is not guranteed to be approximately gaussian, as is assumed in the diffusion paradigm. Thus, we take the following steps to transform the data space into a structured latent space that I hypothesize diffusion will be able to use more effectively:
+**Pipeline**:
+1. **Preprocessing** (reused from ProteinDiff):
+   - Compute local coordinate frames per residue
+   - Voxelize side chain space around each residue
+   - Compute electric field using AMBER ff19SB partial charges
+   - Compute divergence → scalar field `(ZN, 1, V, V, V)` capturing local environment
 
-The input to the SideChain VAE is the full atomic coordinates, and the amino acid labels.
+2. **CNN Flattening**:
+   - 3D CNN to flatten voxel `(ZN, 1, V, V, V)` → vector `(ZN, d_voxel)`
+   - Embeds local residue environment
 
-1. First step is to compute the virtual $C_\beta$ atom from empirical constants.
-2. Next step is to define a local coordinate frame for each residue: 
-    - The y-axis is the vector pointing from $C_\alpha \rightarrow C_\beta$
-    - The x-axis is the vector that is pointing from $N \rightarrow C$ projected onto the plane normal to the y-axis vector
-    - The z-axis is the cross product of the two.  
-    - Use the virtual $C_\beta$ if used for frame computation, but the true position for electrostatic field computation later (no $C_\beta$ for glycine).
-3. Using this local coordinate frame, we construct a voxel for each residue, with origin at the $C_\beta$, of size $X \times Y \times Z$ (e.g. 16 x 16 x 16)
-4. For each atom we assign a partial charge using the AMBER partial charges from ff19SB. using the electric vector field formula, for each residue, we sum the electric effects of all atoms of the residue relative to each cell in the voxel. this creates a voxel for each residue, where each cell is a 3D vector indicating the direction and magnitude of the local electric field at that point. However, this introduces a few problems
-    - The voxel is large enough to capture the majority of amino acid rotamers, but the downside is that the majority of the voxel will be empty, making it easy to overfit to these empty regions. To prevent this, we normalize the vector of each cell to unit length, making the voxel field purely directional. This does, however, introduce another problem.
-    - If the model is trained to denoise unit vectors, these unit vectors do not lie on a Euclidian manifold, they lie on S2 manifold, which would require specialized noise, such as Brownian motion instead of Gaussian noise, and special denoising techniques. To counteract this, we compute the divergence of this directional field, which is a scalar field and lies on a Euclidean manifold. To achieve this, we use finite differences technique. Note that in a true electric field, the divergence is zero everwhere except at the points containing charges, but this is no longer the case since we normed all vectors to unit length.
-    - Here is an example of what the scalar field looks like for a single amino acid, along with what gaussian noise looks like in the voxel. All cells within [-0.5,0.5] have been whitened out for the purposes of visualization.
+3. **GNN (ProteinMPNN-style)**:
+   - **Nodes**: Flattened divergence vectors `(ZN, d_voxel)`
+   - **Edges**: Derived from backbone geometry (RBF distances, rotation matrices, relative positions)
+   - Message passing aggregates structural neighborhood information
+   - Output: `(ZN, d_model)` with mixed local + structural features
 
-<p align="center">
-  <img src="docs/img/true.png" alt="Arch" width="500"/>
-  <img src="docs/img/noise.png" alt="Arch" width="500"/>
-</p>
+4. **Transformer Self-Attention**:
+   - Multiple layers of self-attention on `(ZN, d_model)` token representations
+   - This is the **largest component** of the encoder
+   - Captures long-range dependencies across the full protein
 
-5. Thus far, all the steps performed are essentially preprocessing steps. But here is where it gets interesting.
+5. **Mixture of Queries (MoQ)**:
+   - **Learnable query bank**: `(N_query_bank, d_model)` where `N_query_bank = 16-32 × N_latent`
+   - **Router**: Soft-weighted (top-k) selection of `N_latent` query vectors based on full input
+   - Router sees all tokens and selects queries for the entire sample (all tokens attend to same queries)
+   - **Cross-attention**: Selected queries `(N_latent, d_model)` attend to encoder tokens `(ZN, d_model)`
+   - Output: Fixed-size representation `(N_latent, d_model)`
 
-    - Side Chain Variational Auto Encoder (VAE)
-        
-        - The first step is to train a variational autoencoder that learns how to compress the voxelized divergence field of each residue, capturing broad and semantic information, such that the it can be reconstructed by the decoder using the sampled latent representation. the vae is pre-trained (along with classifier, but with stop-grad) on the true divergence voxels. In this stage, there is no backbone/graph conditioning, the vae only has access to each residues individual voxels, with no cross-talk between residues.
-        
-        - Encoder
+6. **Query Self-Attention**:
+   - Few layers of self-attention on `(N_latent, d_model)` query representations
+   - Refines information compressed into fixed number of vectors
 
-            - The plan here is to keep it as simple as possible; planning to downsample the voxel from 1x16x16x16 to 16x1x1x1 with downsampling convolutions. pass the downsampled voxels through a linear layer to get mean and logvars, then sample a latent (Z). Note that a small KL-Divergence term is added to regularize the latent space. Note that during inference, the encoder is not used, as the model starts from pure noise.
+7. **Latent Sampling**:
+   - Linear projection → `mean` and `logvar` `(N_latent, d_latent)`
+   - Sample latent vectors `z ~ N(mean, exp(0.5 * logvar))`
+   - Output: `(N_latent, d_latent)` fixed-size latent representation
 
-        - Decoder
+**Key Parameters**:
+- `N_latent`: Fixed number of latent vectors (hyperparameter, e.g., 64)
+- `N_query_bank`: Size of learnable query bank (e.g., 1024-2048)
+- `d_model`: Feature dimension throughout encoder
+- `d_latent`: Latent vector dimension
 
-            - Decoder performs transposed convolutions to upsample the latent (symmetric to encoder). the output of the decoder is a scalar value for each cell, for each residue. the loss is then mean squared error, summed over residues.
+---
 
-        - Amino Acid Classification
+### 2. VAE Decoder
 
-            - This is the simplest module. simply predicts the amino acid class from the reconstructed voxel potentials. Trained alongside vae, but the output of the decoder is detached before going into the classifier, this way the gradients of the classifier do not affect the VAE gradients. Loss is CEL for this module, summed over residues. The 1x16x16x16 voxels are downsampled until get $1\times1\times1\times d_\text{model}$ tensor, project to $num_\text{aa}$, softmax and sample. 
+**Input**: Latent vectors `(N_latent, d_latent)`
 
+**Pipeline**:
+1. **Latent Self-Attention**:
+   - Few layers of self-attention on `(N_latent, d_latent)` latent vectors
+   - Processes compressed information
 
-### BackBone VAE
+2. **Empty Token Initialization**:
+   - Create `(ZN, d_model)` "empty" placeholder tokens
+   - **Only positional information**: Sinusoidal positional encodings based on sequence index
+   - No amino acid or structural information
 
-Before allowing the diffusion module to denoise the latent vectors, we must have a way to encode each latent vector's global position and orientation in the protein. Given the scalability of transformers, I would rather not implement any distance masking or special techniques for 3D data. The goal is to instead have an analog of positional encoding for 3D data. This is easier said than done, but I am taking a page out of ESM's book in their structure VQ-VAE used in their ESM3 model. In their case, they used a VQ-VAE to tokenize each residue's backbone structure into one of the 4099 possible structure tokens in their codebook. They implemented a novel GeometricMHA module that reasons over residue neighborhoods (only taking into account 16 NN) using only relative sequence indexes and relative translation/rotation vectors to map each neighborhood to a discrete structure token, and had a decoder perform all-to-all attention (no GeoMHA) over the structure tokens to reconstruct the coordinates. 
+3. **Cross-Attention (Latent → Tokens)**:
+   - Empty tokens `(ZN, d_model)` are **queries**
+   - Latent vectors `(N_latent, d_model)` are **keys/values**
+   - Decoder attends to latent representation to fill in token information
 
-My proposition is similar, but with a few tweaks. The most notable is that my decoder does not need to reconstruct the full atomic coordinates, only the backbone coordinates (as that is what will be fed to the encoder). Additionally, my model is only focused on IF, not multmodal learning, so the decoder is not used at inference; its only purpose is to steer the encoder to bake global structural information into its latent representation. Also, my structure tokenizer is a regular VAE, not a VQ-VAE. My reasoning is that the vae would do a better job of dealing with noisy coordinates, since it maps each residue's backbone to a continuous latent space, and that this continuous latent space will be more expressive than a discrete latent space, especially in encoding relationships between residues. This is just my intuition, so if it does not work as well as I am hoping, I will simply move to using a VQ-VAE. The final change I will be making is that I will not use Geometric MHA for the encoder, and will instead opt for a MPNN. They essentially performed a gather over the 16 NN and performed GeoMHA on the neighbors, which makes sense since we want the encoder to capture these neighborhoods, but I think a MPNN is much better suited for this task, especially since we can use explicit edges with this architecture, which gives the model a better inductive bias to model relationships. Thus, I will be using a similar architecture that proteinMPNN used for their encoder.
+4. **Token Self-Attention**:
+   - Self-attention on `(ZN, d_model)` decoded tokens
+   - Refines reconstructed representations
 
-Now, to summarize my BBVAE, the starting point for the nodes will be a learned null vector, and the edges will be 16 RBF functions with evenly spaced centers for each inter-residue backbone atom pair, the flattened rotation matrix to get from source node orientation to neighbor node orientation, and the relative sequence embeddings. by the end of multiple message passing operations, the nodes will be projected to predict a mean and variance for each residue, which is used to sample a structural latent. Thus the job of the encoder is to map the 16 edge vectors of each node of size $16_\text{RBF}\times4_\text{BB\_atoms\_source}\times4_\text{BB\_atoms\_nbr} + 9_\text{R\_flat} + 1_\text{relative\_seq}$ tensors to a single $d_\text{latent}$ vector, which the decoder will perform all-to-all attention with to reconstruct the backbone coordinates. Similarly to ESM3, I will also include a binned distance and angular classification head, since they noted this improved early performance, and a sequence classification head, so that the encoder is encouraged to bake sequence information into the representation also. 
+5. **Multi-Task Output Heads**:
+   - **Voxel Reconstruction**: `(ZN, 1, V, V, V)` reconstructed divergence voxels
+   - **AA Classification**: `(ZN, 20)` amino acid logits
+   - **Distogram**: `(ZN, ZN, n_bins)` pairwise distance distributions
+   - **Anglogram**: `(ZN, ZN, n_angle_bins)` pairwise angle distributions
+   - **Distance Map**: `(ZN, ZN)` pairwise distances
+   - **Torsion Angles**: `(ZN, n_torsions)` backbone/side chain torsions
+   - **Atomic Coordinates**: `(ZN, 14, 3)` reconstructed all-atom coordinates
 
-Now we move to the main course
+**Output**: Reconstructs original protein with same number of residues `(ZN)` as input
 
-### Latent Diffusion
-The Side Chain VAE mapped residue environments to a latent space, while the BackBone VAE mapped structural information to a different latent space. The latent diffusion will work with clean structural latents, and noisy side chain latents, as its job is to denoise the side chain latents given the structural context. The fusion of these modalities will most likely be a simple cat + MLP of the side chain and backbone latents. 
+---
 
-We also need a conditioning mechanism for 1) the timestep, and 2) the known amino acid identities, so that we can also generate sequences from known structures with partial sequences. Thus I will implement the diffusion model as a DiT model, using AdaLN for the conditioning mechanism. This is proven to be scalable, and my hope is that even if I can't get it to work with my resources, someone will be able to build on this with more resources and see improved performance. 
+### 3. Conditioning Network (for Diffusion)
 
+**Purpose**: Encode partial sequence and/or partial structure into fixed-size conditioning vectors
+
+**Input**:
+- Amino acid labels `(ZN,)` with MASK tokens for unknown positions
+- Backbone coordinates `(ZN, 4, 3)` [N, CA, C, O] with missing coordinates for masked positions
+
+**Pipeline**:
+1. **Node Initialization**:
+   - Embed amino acid labels (including MASK tokens) → `(ZN, d_model)`
+
+2. **Hybrid MPNN/1D-CNN**:
+   - **GNN Component**:
+     - **Nodes**: Only residues with known coordinates participate in message passing
+     - **Edges**: Computed from backbone geometry (top-k neighbors, RBF distances, rotations)
+     - Masked nodes (no coordinates) do **not** participate in GNN
+
+   - **1D CNN Component**:
+     - After each GNN message passing operation, apply small 1D convolution
+     - Kernel size: 3-6 residues
+     - Purpose: Propagate information from nodes with coordinates to nearby masked neighbors
+     - Implementation: Use masking + gather/scatter (no padding) to integrate with FlashAttention variable-length sequences
+     - Ensures samples don't interact via careful masking
+
+   - **Result**: Nodes with coordinates get strong structural signal from GNN; masked nodes get weaker signal from 1D conv propagation
+
+3. **Self-Attention**:
+   - Multiple layers of self-attention on `(ZN, d_model)` conditioned tokens
+   - Further integrates partial sequence and structure information
+
+4. **Mixture of Queries (MoQ)**:
+   - **Separate learnable query bank** from encoder (independent learning)
+   - Same number of selected queries as encoder (`N_latent`)
+   - Soft-weighted top-k routing based on conditioned tokens
+   - Cross-attention: Selected queries attend to conditioned tokens
+   - Output: `(N_latent, d_model)` conditioning vectors in same space as latent vectors
+
+5. **Conditioning Self-Attention**:
+   - Few layers of self-attention on `(N_latent, d_model)` conditioning vectors
+   - Refines conditioning representation
+
+**Output**: `(N_latent, d_model)` conditioning vectors matching latent dimensionality
+
+---
+
+### 4. Latent Diffusion Model
+
+**Input**:
+- Noisy latent vectors `z_t` `(N_latent, d_latent)`
+- Conditioning vectors `c` `(N_latent, d_model)` from conditioning network
+- Timestep `t`
+
+**Pipeline**:
+1. **Conditioning Integration**:
+   - Project conditioning vectors to latent space if needed
+   - Combine with timestep embeddings
+
+2. **Denoising Network**:
+   - Multiple layers of self-attention on `(N_latent, d_latent)` latent vectors
+   - **AdaLN (Adaptive Layer Normalization)** conditioning:
+     - Modulate features based on timestep `t`
+     - Modulate based on partial structure (from conditioning network)
+     - Modulate based on partial sequence (from conditioning network)
+   - Architecture: DiT-style (Diffusion Transformer) blocks
+
+3. **Noise Prediction**:
+   - Predict noise `ε_θ(z_t, t, c)`
+   - Loss: MSE between predicted and actual noise
+
+**Diffusion Process**:
+- Forward: Add Gaussian noise to clean latents from encoder
+- Reverse: Iteratively denoise starting from random Gaussian noise
+- Conditioning: Partial sequence/structure via conditioning network
+
+---
+
+## Loss Functions
+
+### VAE Losses (Multi-Task)
+
+1. **KL Divergence**: `D_KL(q(z|x) || p(z))` where `p(z) = N(0, I)`
+2. **Voxel Reconstruction**: MSE between predicted and ground truth divergence voxels
+3. **AA Classification**: Cross-entropy loss for amino acid prediction
+4. **Distogram**: Cross-entropy over distance bins
+5. **Anglogram**: Cross-entropy over angle bins
+6. **Distance Map**: MSE for pairwise distances
+7. **Torsion Loss**: MSE or circular loss for torsion angles
+8. **Mutual Information Loss**: Maximize MI between latent vectors and reconstructions
+9. **MoQ Routing Losses**:
+   - Load balancing loss (similar to MoE)
+   - Routing entropy regularization
+10. **Query Diversity Loss**: Encourage different query vectors via dot product loss
+    - Penalize high similarity between selected (or all) query vectors
+    - `L_diversity = ||Q^T Q - I||^2` where Q is query matrix
+
+### Diffusion Loss
+
+- **Noise Prediction**: MSE between predicted noise and ground truth Gaussian noise
+- `L_diffusion = ||ε - ε_θ(z_t, t, c)||^2`
+
+---
+
+## Training Strategy
+
+### Stage 1: VAE Training
+- Train encoder + decoder end-to-end with multi-task losses
+- Input: Full atomic coordinates + labels
+- Output: Reconstructions for all modalities
+- Goal: Learn compressed fixed-size latent representation
+
+### Stage 2: Diffusion Training
+- **Freeze VAE** (encoder + decoder)
+- Train conditioning network + diffusion model
+- Input: Partial sequence/structure → conditioning network
+- Latents: Sampled from frozen encoder on full protein
+- Goal: Learn to denoise latents conditioned on partial information
+
+---
+
+## Generation Capabilities
+
+### Unconditional Generation
+- Sample `z ~ N(0, I)` with fixed `N_latent` vectors
+- Run diffusion reverse process with fully masked conditioning (or no conditioning)
+- Decode latents → full protein structure
+
+### Conditional Generation
+- **Partial Sequence**: Provide some AA labels, mask others
+- **Partial Structure**: Provide some backbone coordinates, mask others
+- **Hybrid**: Any combination of partial seq/struct
+- Conditioning network processes partial information
+- Diffusion generates latents conditioned on known information
+
+### Latent Interpolation
+- Encode two known proteins: `z_A`, `z_B`
+- Interpolate: `z_interp = α * z_A + (1-α) * z_B`
+- Option 1: Decode directly with VAE decoder
+- Option 2: Use as initialization for conditional/unconditional diffusion
+- Can vary target sequence length by adjusting number of empty tokens in decoder
+
+### Multi-Length Generation
+- Fixed latent size enables generation of proteins with different lengths
+- Decoder cross-attention can attend to latents for any number of output tokens
+- Specify desired length via number of empty tokens
+
+---
+
+## Key Advantages
+
+1. **Fixed-Size Latents**:
+   - Faster training (no variable-length attention in diffusion)
+   - More stable diffusion (consistent latent dimensionality)
+   - Enables latent arithmetic (interpolation, manipulation)
+
+2. **Mixture of Queries**:
+   - Learned compression via soft query selection
+   - Forces model to capture essential information in fixed vectors
+   - Routing can specialize queries for different protein types
+
+3. **Flexible Conditioning**:
+   - Generate proteins from any combo of partial seq/struct
+   - Scientists can prompt model like: "fold this sequence with this motif structure"
+   - Future: Add functional annotations as conditioning
+
+4. **Multimodal Understanding**:
+   - Single model understands sequence, structure, and geometry
+   - Multi-task learning improves representation quality
+   - Can be extended to include function, binding sites, etc.
+
+5. **Latent Space Manipulation**:
+   - Interpolate between known proteins
+   - Explore latent space for novel designs
+   - Conditional/unconditional generation from same latent space
+
+---
+
+## Technical Details
+
+### Masking Strategy (Training)
+- **Random masking percentage**: Sample from uniform distribution (possibly with curriculum ramping)
+- **Independent masking**: Sequence and structure can be independently masked
+  - Example: Know residues 1-50 sequence, residues 30-80 structure
+- **GNN handling**: Masked coordinate nodes excluded from graph construction
+  - Topology computed only from known coordinates (top-k neighbors)
+  - 1D conv propagates info to masked nodes after each message passing step
+
+### Variable-Length Sequence Handling
+- **No padding**: Use FlashAttention with `cu_seqlens` and `max_seqlen`
+- **1D CNN masking**: Gather/scatter operations ensure samples don't interact
+- **Careful masking**: Prevent cross-contamination between proteins in batch
+
+### MoQ Implementation Details
+- **Two independent query banks**: Encoder and conditioning network learn separate queries
+- **Soft-weighted routing**: Top-k selection with routing probabilities
+- **Same N_latent**: Conditioning must produce same number of vectors as encoder for compatibility
+- **Query diversity loss**: Encourage orthogonal/diverse query representations
+
+### Preprocessing (Reused from ProteinDiff)
+- Local coordinate frame computation
+- Voxelization of side chain environment
+- Electric field calculation (AMBER ff19SB charges)
+- Divergence computation → scalar field representation
+- **Deterministic**: No randomness in preprocessing ensures reproducibility
+
+---
+
+## Implementation Roadmap
+
+### Phase 1: VAE Development
+1. Implement MoQ routing module
+2. Build encoder: CNN → GNN → Transformer → MoQ → Latent sampling
+3. Build decoder: Latent self-attn → Cross-attn with empty tokens → Multi-task heads
+4. Implement all VAE losses
+5. Training script for Stage 1
+
+### Phase 2: Conditioning Network
+1. Implement hybrid MPNN/1D-CNN with masking
+2. Build conditioning MoQ (separate from encoder)
+3. Test with various masking strategies
+4. Integrate with existing preprocessing
+
+### Phase 3: Diffusion Model
+1. Implement AdaLN-conditioned diffusion transformer
+2. Integrate conditioning network
+3. Training script for Stage 2 (frozen VAE)
+4. Implement sampling/generation scripts
+
+### Phase 4: Evaluation & Extensions
+1. Benchmark generation quality (TM-score, sequence recovery, etc.)
+2. Test latent interpolation
+3. Ablation studies on MoQ, conditioning, losses
+4. Future: Add functional annotations, binding site conditioning, etc.
+
+---
+
+## Relationship to Current ProteinDiff
+
+### Components to Keep
+- Preprocessing pipeline (voxelization, divergence computation)
+- Data loading infrastructure (DataHolder, DataBatch, variable-length batching)
+- Static data (AMBER charges, constants)
+- Docker setup, config system
+
+### Components to Replace
+- Encoder architecture (new: CNN → GNN → Transformer → MoQ)
+- Decoder architecture (new: cross-attn with empty tokens, multi-task heads)
+- Add conditioning network (new: hybrid MPNN/1D-CNN)
+- Diffusion model (new: fixed-size latents, AdaLN conditioning)
+- Loss functions (new: multi-task VAE losses, query diversity)
+
+### Development Approach
+- **Mostly a rewrite** of model architecture
+- Keep proven components (preprocessing, data pipeline)
+- Implement alongside current ProteinDiff for comparison
+- Proof-of-concept before adding function/other modalities
+
+---
+
+## Open Questions / Future Work
+
+1. **Optimal N_latent**: How many latent vectors for different protein sizes?
+2. **Query bank size**: Ratio of `N_query_bank / N_latent` (currently 16-32x)
+3. **1D CNN kernel size**: What neighborhood size for masked info propagation?
+4. **Masking curriculum**: Fixed vs. ramped masking during training
+5. **Query diversity loss weight**: Balance between diversity and task performance
+6. **Extension to function**: How to incorporate GO terms, binding sites, etc.
+7. **Multi-domain proteins**: Does fixed latent size handle large, multi-domain proteins?
+8. **Latent space structure**: Does MoQ create interpretable latent dimensions?
