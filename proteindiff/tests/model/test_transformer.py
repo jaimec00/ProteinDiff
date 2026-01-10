@@ -20,22 +20,22 @@ class TestMHA:
         return MHACfg(d_model=64, heads=4, dropout_p=0.0)
 
     @pytest.fixture
-    def mha(self, mha_config):
+    def mha(self, mha_config, device):
         """Create an MHA module with test configuration."""
-        return MHA(mha_config)
+        return MHA(mha_config).to(device)
 
     @pytest.fixture
-    def sample_input(self):
+    def sample_input(self, device):
         """Create sample input with variable-length sequences."""
         torch.manual_seed(42)
 
         # Two sequences: length 3 and 5 (total ZN=8)
         ZN = 8
         d_model = 64
-        x = torch.randn(ZN, d_model)
+        x = torch.randn(ZN, d_model, device=device)
 
         # Cumulative sequence lengths [0, 3, 8]
-        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         return x, cu_seqlens, max_seqlen
@@ -64,16 +64,16 @@ class TestMHA:
         assert output.shape == x.shape
         assert output.dtype == x.dtype
 
-    def test_mha_single_sequence(self, mha_config):
+    def test_mha_single_sequence(self, mha_config, device):
         """Test MHA with a single sequence."""
-        mha = MHA(mha_config)
+        mha = MHA(mha_config).to(device)
         torch.manual_seed(123)
 
         # Single sequence of length 10
         ZN = 10
         d_model = 64
-        x = torch.randn(ZN, d_model)
-        cu_seqlens = torch.tensor([0, 10], dtype=torch.int32)
+        x = torch.randn(ZN, d_model, device=device)
+        cu_seqlens = torch.tensor([0, 10], dtype=torch.int32, device=device)
         max_seqlen = 10
 
         output = mha(x, cu_seqlens, max_seqlen)
@@ -104,32 +104,32 @@ class TestMHA:
         assert x.grad is not None
         assert torch.all(torch.isfinite(x.grad))
 
-    def test_mha_sequence_independence(self, mha):
+    def test_mha_sequence_independence(self, mha, device):
         """Test that different sequences in batch don't affect each other."""
         torch.manual_seed(456)
 
         d_model = 64
 
         # Create two sequences separately
-        seq1 = torch.randn(3, d_model)
-        seq2 = torch.randn(5, d_model)
+        seq1 = torch.randn(3, d_model, device=device)
+        seq2 = torch.randn(5, d_model, device=device)
 
         # Process separately
-        cu_seqlens_1 = torch.tensor([0, 3], dtype=torch.int32)
-        cu_seqlens_2 = torch.tensor([0, 5], dtype=torch.int32)
+        cu_seqlens_1 = torch.tensor([0, 3], dtype=torch.int32, device=device)
+        cu_seqlens_2 = torch.tensor([0, 5], dtype=torch.int32, device=device)
         out1 = mha(seq1, cu_seqlens_1, 3)
         out2 = mha(seq2, cu_seqlens_2, 5)
 
         # Process together
         combined = torch.cat([seq1, seq2], dim=0)
-        cu_seqlens_combined = torch.tensor([0, 3, 8], dtype=torch.int32)
+        cu_seqlens_combined = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
         out_combined = mha(combined, cu_seqlens_combined, 5)
 
         # Outputs should match
         torch.testing.assert_close(out_combined[:3], out1, rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(out_combined[3:], out2, rtol=1e-4, atol=1e-4)
 
-    def test_torch_attn_varlen_qkvpacked_func(self):
+    def test_torch_attn_varlen_qkvpacked_func(self, device):
         """Test the PyTorch CPU fallback attention implementation."""
         torch.manual_seed(789)
 
@@ -138,8 +138,8 @@ class TestMHA:
         Dk = 16
 
         # Create packed QKV
-        qkv = torch.randn(ZN, 3, H, Dk)
-        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        qkv = torch.randn(ZN, 3, H, Dk, device=device)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         # Run attention
@@ -151,7 +151,7 @@ class TestMHA:
         assert output.shape == (ZN, H, Dk)
         assert torch.all(torch.isfinite(output))
 
-    def test_torch_attn_masking(self):
+    def test_torch_attn_masking(self, device):
         """Test that PyTorch attention properly masks between sequences."""
         torch.manual_seed(999)
 
@@ -160,11 +160,11 @@ class TestMHA:
         Dk = 8
 
         # Create QKV where Q has strong values in first sequence
-        qkv = torch.randn(ZN, 3, H, Dk)
+        qkv = torch.randn(ZN, 3, H, Dk, device=device)
         qkv[:3, 0, :, :] = 10.0  # Strong queries in first sequence
         qkv[3:, 0, :, :] = 0.1   # Weak queries in second sequence
 
-        cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32, device=device)
         max_seqlen = 3
 
         output = torch_attn_varlen_qkvpacked_func(
@@ -198,19 +198,19 @@ class TestTransformerBlock:
         return TransformerBlockCfg(d_model=d_model, attn=attn_cfg, ffn=ffn_cfg)
 
     @pytest.fixture
-    def transformer_block(self, block_config):
+    def transformer_block(self, block_config, device):
         """Create a transformer block."""
-        return TransformerBlock(block_config)
+        return TransformerBlock(block_config).to(device)
 
     @pytest.fixture
-    def sample_input(self):
+    def sample_input(self, device):
         """Create sample input for transformer block."""
         torch.manual_seed(42)
 
         ZN = 8
         d_model = 64
-        x = torch.randn(ZN, d_model)
-        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        x = torch.randn(ZN, d_model, device=device)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         return x, cu_seqlens, max_seqlen
@@ -306,19 +306,19 @@ class TestTransformerModel:
         return TransformerModelCfg(blocks=[block_cfg, block_cfg])
 
     @pytest.fixture
-    def transformer_model(self, model_config):
+    def transformer_model(self, model_config, device):
         """Create a transformer model."""
-        return TransformerModel(model_config)
+        return TransformerModel(model_config).to(device)
 
     @pytest.fixture
-    def sample_input(self):
+    def sample_input(self, device):
         """Create sample input for transformer model."""
         torch.manual_seed(42)
 
         ZN = 8
         d_model = 64
-        x = torch.randn(ZN, d_model)
-        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        x = torch.randn(ZN, d_model, device=device)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         return x, cu_seqlens, max_seqlen
@@ -366,15 +366,15 @@ class TestTransformerModel:
                 assert param.grad is not None
                 assert torch.all(torch.isfinite(param.grad))
 
-    def test_model_multiple_sequences(self, transformer_model):
+    def test_model_multiple_sequences(self, transformer_model, device):
         """Test model with multiple sequences of varying lengths."""
         torch.manual_seed(123)
 
         # Three sequences: lengths 2, 5, 3 (total ZN=10)
         ZN = 10
         d_model = 64
-        x = torch.randn(ZN, d_model)
-        cu_seqlens = torch.tensor([0, 2, 7, 10], dtype=torch.int32)
+        x = torch.randn(ZN, d_model, device=device)
+        cu_seqlens = torch.tensor([0, 2, 7, 10], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         output = transformer_model(x, cu_seqlens, max_seqlen)
@@ -382,7 +382,7 @@ class TestTransformerModel:
         assert output.shape == (ZN, d_model)
         assert torch.all(torch.isfinite(output))
 
-    def test_model_single_block(self):
+    def test_model_single_block(self, device):
         """Test model with a single transformer block."""
         d_model = 64
         attn_cfg = MHACfg(
@@ -400,11 +400,11 @@ class TestTransformerModel:
         block_cfg = TransformerBlockCfg(d_model=d_model, attn=attn_cfg, ffn=ffn_cfg)
         model_cfg = TransformerModelCfg(blocks=[block_cfg])
 
-        model = TransformerModel(model_cfg)
+        model = TransformerModel(model_cfg).to(device)
 
         torch.manual_seed(456)
-        x = torch.randn(5, d_model)
-        cu_seqlens = torch.tensor([0, 5], dtype=torch.int32)
+        x = torch.randn(5, d_model, device=device)
+        cu_seqlens = torch.tensor([0, 5], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         output = model(x, cu_seqlens, max_seqlen)
@@ -412,7 +412,7 @@ class TestTransformerModel:
         assert output.shape == (5, d_model)
         assert torch.all(torch.isfinite(output))
 
-    def test_model_deep_stack(self):
+    def test_model_deep_stack(self, device):
         """Test model with deeper stack (4 blocks)."""
         d_model = 64
         attn_cfg = MHACfg(
@@ -430,11 +430,11 @@ class TestTransformerModel:
         block_cfg = TransformerBlockCfg(d_model=d_model, attn=attn_cfg, ffn=ffn_cfg)
         model_cfg = TransformerModelCfg(blocks=[block_cfg] * 4)
 
-        model = TransformerModel(model_cfg)
+        model = TransformerModel(model_cfg).to(device)
 
         torch.manual_seed(789)
-        x = torch.randn(8, d_model)
-        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        x = torch.randn(8, d_model, device=device)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
         max_seqlen = 5
 
         output = model(x, cu_seqlens, max_seqlen)
@@ -455,7 +455,7 @@ class TestTransformerModel:
         # Outputs should be different for different inputs
         assert not torch.allclose(output1, output2, atol=1e-3)
 
-    def test_model_large_batch(self, transformer_model):
+    def test_model_large_batch(self, transformer_model, device):
         """Test model with larger batch of sequences."""
         torch.manual_seed(999)
 
@@ -463,9 +463,9 @@ class TestTransformerModel:
         lengths = [4, 7, 3, 6, 5]
         ZN = sum(lengths)
         d_model = 64
-        x = torch.randn(ZN, d_model)
+        x = torch.randn(ZN, d_model, device=device)
 
-        cu_seqlens = torch.tensor([0] + [sum(lengths[:i+1]) for i in range(len(lengths))], dtype=torch.int32)
+        cu_seqlens = torch.tensor([0] + [sum(lengths[:i+1]) for i in range(len(lengths))], dtype=torch.int32, device=device)
         max_seqlen = max(lengths)
 
         output = transformer_model(x, cu_seqlens, max_seqlen)

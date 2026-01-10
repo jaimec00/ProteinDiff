@@ -13,22 +13,22 @@ class TestMLP:
     """Test suite for the MLP module."""
 
     @pytest.fixture
-    def default_mlp(self):
+    def default_mlp(self, device):
         """Create an MLP with default configuration."""
         cfg = MLPCfg()
-        return MLP(cfg)
+        return MLP(cfg).to(device)
 
     @pytest.fixture
-    def small_mlp(self):
+    def small_mlp(self, device):
         """Create a smaller MLP for faster tests."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, hidden_layers=0)
-        return MLP(cfg)
+        return MLP(cfg).to(device)
 
     @pytest.fixture
-    def deep_mlp(self):
+    def deep_mlp(self, device):
         """Create a deeper MLP with multiple hidden layers."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, hidden_layers=3)
-        return MLP(cfg)
+        return MLP(cfg).to(device)
 
     def test_mlp_initialization(self, default_mlp):
         """Test that MLP initializes with correct modules."""
@@ -56,10 +56,10 @@ class TestMLP:
             assert layer.in_features == 128
             assert layer.out_features == 128
 
-    def test_forward_pass_basic(self, small_mlp):
+    def test_forward_pass_basic(self, small_mlp, device):
         """Test basic forward pass through MLP."""
         batch_size = 4
-        x = torch.randn(batch_size, 64)
+        x = torch.randn(batch_size, 64, device=device)
 
         output = small_mlp(x)
 
@@ -69,10 +69,10 @@ class TestMLP:
         # Check output is finite
         assert torch.all(torch.isfinite(output))
 
-    def test_forward_pass_deep(self, deep_mlp):
+    def test_forward_pass_deep(self, deep_mlp, device):
         """Test forward pass through deep MLP with multiple hidden layers."""
         batch_size = 8
-        x = torch.randn(batch_size, 64)
+        x = torch.randn(batch_size, 64, device=device)
 
         output = deep_mlp(x)
 
@@ -82,18 +82,18 @@ class TestMLP:
         # Check output is finite
         assert torch.all(torch.isfinite(output))
 
-    def test_forward_pass_batched(self, small_mlp):
+    def test_forward_pass_batched(self, small_mlp, device):
         """Test forward pass with different batch sizes."""
         for batch_size in [1, 4, 16, 32]:
-            x = torch.randn(batch_size, 64)
+            x = torch.randn(batch_size, 64, device=device)
             output = small_mlp(x)
             assert output.shape == (batch_size, 32)
 
-    def test_forward_pass_3d_input(self, small_mlp):
+    def test_forward_pass_3d_input(self, small_mlp, device):
         """Test forward pass with 3D input (e.g., sequence data)."""
         batch_size = 4
         seq_len = 10
-        x = torch.randn(batch_size, seq_len, 64)
+        x = torch.randn(batch_size, seq_len, 64, device=device)
 
         output = small_mlp(x)
 
@@ -101,45 +101,45 @@ class TestMLP:
         assert output.shape == (batch_size, seq_len, 32)
         assert torch.all(torch.isfinite(output))
 
-    def test_activation_gelu(self):
+    def test_activation_gelu(self, device):
         """Test MLP with GELU activation."""
         cfg = MLPCfg(d_in=32, d_out=32, d_hidden=64, act=ActivationFn.GELU)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(4, 32)
+        x = torch.randn(4, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 32)
         assert torch.all(torch.isfinite(output))
 
-    def test_activation_relu(self):
+    def test_activation_relu(self, device):
         """Test MLP with ReLU activation."""
         cfg = MLPCfg(d_in=32, d_out=32, d_hidden=64, act=ActivationFn.RELU)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(4, 32)
+        x = torch.randn(4, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 32)
         assert torch.all(torch.isfinite(output))
 
-    def test_activation_silu(self):
+    def test_activation_silu(self, device):
         """Test MLP with SiLU activation."""
         cfg = MLPCfg(d_in=32, d_out=32, d_hidden=64, act=ActivationFn.SILU)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(4, 32)
+        x = torch.randn(4, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 32)
         assert torch.all(torch.isfinite(output))
 
-    def test_activation_sigmoid(self):
+    def test_activation_sigmoid(self, device):
         """Test MLP with Sigmoid activation."""
         cfg = MLPCfg(d_in=32, d_out=32, d_hidden=64, act=ActivationFn.SIGMOID)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(4, 32)
+        x = torch.randn(4, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 32)
@@ -152,14 +152,14 @@ class TestMLP:
         with pytest.raises(ValueError, match="Invalid Activation"):
             MLP(cfg)
 
-    def test_dropout_training_mode(self):
+    def test_dropout_training_mode(self, device):
         """Test that dropout is applied in training mode."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, dropout=0.5)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
         mlp.train()
 
         torch.manual_seed(42)
-        x = torch.randn(100, 64)
+        x = torch.randn(100, 64, device=device)
 
         # Run forward pass twice with same input
         output1 = mlp(x)
@@ -168,14 +168,14 @@ class TestMLP:
         # With dropout, outputs should be different
         assert not torch.allclose(output1, output2)
 
-    def test_dropout_eval_mode(self):
+    def test_dropout_eval_mode(self, device):
         """Test that dropout is not applied in eval mode."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, dropout=0.5)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
         mlp.eval()
 
         torch.manual_seed(42)
-        x = torch.randn(100, 64)
+        x = torch.randn(100, 64, device=device)
 
         # Run forward pass twice with same input
         output1 = mlp(x)
@@ -184,23 +184,23 @@ class TestMLP:
         # Without dropout, outputs should be identical
         torch.testing.assert_close(output1, output2)
 
-    def test_no_dropout(self):
+    def test_no_dropout(self, device):
         """Test MLP with no dropout."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, dropout=0.0)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
         mlp.train()
 
-        x = torch.randn(4, 64)
+        x = torch.randn(4, 64, device=device)
         output1 = mlp(x)
         output2 = mlp(x)
 
         # With no dropout, outputs should be identical even in training mode
         torch.testing.assert_close(output1, output2)
 
-    def test_zeros_initialization(self):
+    def test_zeros_initialization(self, device):
         """Test that zeros=True initializes output layer to zeros."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64, zeros=True)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
         # Check output layer is initialized to zeros
         assert torch.allclose(mlp.out_proj.weight, torch.zeros_like(mlp.out_proj.weight))
@@ -209,20 +209,20 @@ class TestMLP:
         # Check other layers are not zeros
         assert not torch.allclose(mlp.in_proj.weight, torch.zeros_like(mlp.in_proj.weight))
 
-    def test_non_zeros_initialization(self):
+    def test_non_zeros_initialization(self, device):
         """Test that zeros=False doesn't initialize output layer to zeros."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64, zeros=False)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
         # Check output layer is not all zeros
         assert not torch.allclose(mlp.out_proj.weight, torch.zeros_like(mlp.out_proj.weight))
 
-    def test_gradient_flow(self):
+    def test_gradient_flow(self, device):
         """Test that gradients flow through MLP."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64, hidden_layers=2)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(4, 32, requires_grad=True)
+        x = torch.randn(4, 32, device=device, requires_grad=True)
         output = mlp(x)
         loss = output.sum()
         loss.backward()
@@ -236,14 +236,14 @@ class TestMLP:
         # Check that input has gradients
         assert x.grad is not None
 
-    def test_deterministic_output(self):
+    def test_deterministic_output(self, device):
         """Test that MLP output is deterministic in eval mode."""
         torch.manual_seed(123)
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, hidden_layers=2, dropout=0.1)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
         mlp.eval()
 
-        x = torch.randn(8, 64)
+        x = torch.randn(8, 64, device=device)
 
         # Run twice with same input
         output1 = mlp(x)
@@ -252,10 +252,10 @@ class TestMLP:
         # Should be identical in eval mode
         torch.testing.assert_close(output1, output2)
 
-    def test_parameter_count(self):
+    def test_parameter_count(self, device):
         """Test that parameter count matches expected."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, hidden_layers=2)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
         # Calculate expected parameters
         # in_proj: 64 * 128 + 128
@@ -271,23 +271,23 @@ class TestMLP:
 class TestInitializationFunctions:
     """Test suite for weight initialization functions."""
 
-    def test_init_orthogonal(self):
+    def test_init_orthogonal(self, device):
         """Test orthogonal initialization."""
-        layer = nn.Linear(64, 64)
+        layer = nn.Linear(64, 64).to(device)
         init_orthogonal(layer)
 
         # Check weight matrix is orthogonal (W @ W^T ≈ I)
         weight = layer.weight.data
         product = weight @ weight.T
-        identity = torch.eye(64)
+        identity = torch.eye(64, device=device)
         assert torch.allclose(product, identity, atol=1e-5)
 
         # Check bias is zeros
         assert torch.allclose(layer.bias, torch.zeros_like(layer.bias))
 
-    def test_init_kaiming(self):
+    def test_init_kaiming(self, device):
         """Test Kaiming initialization."""
-        layer = nn.Linear(64, 32)
+        layer = nn.Linear(64, 32).to(device)
         init_kaiming(layer)
 
         # Check weights are not zeros
@@ -300,9 +300,9 @@ class TestInitializationFunctions:
         weight_std = layer.weight.std()
         assert weight_std > 0.01
 
-    def test_init_xavier(self):
+    def test_init_xavier(self, device):
         """Test Xavier initialization."""
-        layer = nn.Linear(64, 32)
+        layer = nn.Linear(64, 32).to(device)
         init_xavier(layer)
 
         # Check weights are not zeros
@@ -315,9 +315,9 @@ class TestInitializationFunctions:
         weight_std = layer.weight.std()
         assert weight_std > 0.01
 
-    def test_init_zeros(self):
+    def test_init_zeros(self, device):
         """Test zeros initialization."""
-        layer = nn.Linear(64, 32)
+        layer = nn.Linear(64, 32).to(device)
         # Initialize to non-zero first
         nn.init.normal_(layer.weight)
         nn.init.normal_(layer.bias)
@@ -329,9 +329,9 @@ class TestInitializationFunctions:
         assert torch.allclose(layer.weight, torch.zeros_like(layer.weight))
         assert torch.allclose(layer.bias, torch.zeros_like(layer.bias))
 
-    def test_init_with_non_linear_layer(self):
+    def test_init_with_non_linear_layer(self, device):
         """Test that init functions handle non-Linear layers gracefully."""
-        conv = nn.Conv2d(3, 16, 3)
+        conv = nn.Conv2d(3, 16, 3).to(device)
 
         # These should not raise errors, just do nothing
         init_orthogonal(conv)
@@ -342,9 +342,9 @@ class TestInitializationFunctions:
         # Conv layer should be unchanged (not zeros)
         assert not torch.allclose(conv.weight, torch.zeros_like(conv.weight))
 
-    def test_init_without_bias(self):
+    def test_init_without_bias(self, device):
         """Test initialization functions with layers that have no bias."""
-        layer = nn.Linear(64, 32, bias=False)
+        layer = nn.Linear(64, 32, bias=False).to(device)
 
         # These should not raise errors
         init_orthogonal(layer)
@@ -359,79 +359,79 @@ class TestInitializationFunctions:
 class TestMLPEdgeCases:
     """Test suite for MLP edge cases."""
 
-    def test_identity_dimensions(self):
+    def test_identity_dimensions(self, device):
         """Test MLP with same input, hidden, and output dimensions."""
         cfg = MLPCfg(d_in=128, d_out=128, d_hidden=128, hidden_layers=2)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(4, 128)
+        x = torch.randn(4, 128, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 128)
 
-    def test_very_small_dimensions(self):
+    def test_very_small_dimensions(self, device):
         """Test MLP with very small dimensions."""
         cfg = MLPCfg(d_in=2, d_out=1, d_hidden=4, hidden_layers=0)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(8, 2)
+        x = torch.randn(8, 2, device=device)
         output = mlp(x)
 
         assert output.shape == (8, 1)
 
-    def test_very_large_batch(self):
+    def test_very_large_batch(self, device):
         """Test MLP with very large batch size."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(1000, 32)
+        x = torch.randn(1000, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (1000, 16)
         assert torch.all(torch.isfinite(output))
 
-    def test_zero_input(self):
+    def test_zero_input(self, device):
         """Test MLP with zero input."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.zeros(4, 32)
+        x = torch.zeros(4, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 16)
         assert torch.all(torch.isfinite(output))
 
-    def test_single_sample(self):
+    def test_single_sample(self, device):
         """Test MLP with single sample (no batch dimension)."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
-        x = torch.randn(32)
+        x = torch.randn(32, device=device)
         output = mlp(x)
 
         assert output.shape == (16,)
 
-    def test_many_hidden_layers(self):
+    def test_many_hidden_layers(self, device):
         """Test MLP with many hidden layers."""
         cfg = MLPCfg(d_in=32, d_out=16, d_hidden=64, hidden_layers=10)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
         assert len(mlp.hidden_proj) == 10
 
-        x = torch.randn(4, 32)
+        x = torch.randn(4, 32, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 16)
         assert torch.all(torch.isfinite(output))
 
-    def test_no_hidden_layers(self):
+    def test_no_hidden_layers(self, device):
         """Test MLP with no hidden layers (direct in -> out)."""
         cfg = MLPCfg(d_in=64, d_out=32, d_hidden=128, hidden_layers=0)
-        mlp = MLP(cfg)
+        mlp = MLP(cfg).to(device)
 
         assert len(mlp.hidden_proj) == 0
 
-        x = torch.randn(4, 64)
+        x = torch.randn(4, 64, device=device)
         output = mlp(x)
 
         assert output.shape == (4, 32)

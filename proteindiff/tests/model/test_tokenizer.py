@@ -13,19 +13,19 @@ class TestTokenizer:
     """Test suite for the Tokenizer module."""
 
     @pytest.fixture
-    def tokenizer(self):
+    def tokenizer(self, device):
         """Create a tokenizer with default configuration."""
         cfg = TokenizerCfg(voxel_dim=16, cell_dim=1.0)
-        return Tokenizer(cfg)
+        return Tokenizer(cfg).to(device)
 
     @pytest.fixture
-    def small_tokenizer(self):
+    def small_tokenizer(self, device):
         """Create a smaller tokenizer for faster tests."""
         cfg = TokenizerCfg(voxel_dim=8, cell_dim=1.0)
-        return Tokenizer(cfg)
+        return Tokenizer(cfg).to(device)
 
     @pytest.fixture
-    def sample_protein(self):
+    def sample_protein(self, device):
         """Create a simple sample protein with valid backbone coordinates."""
         torch.manual_seed(42)
         np.random.seed(42)
@@ -36,23 +36,23 @@ class TestTokenizer:
 
         # Create realistic backbone coordinates using random but structured approach
         # Start at origin and build a chain with realistic bond lengths/angles
-        coords = torch.zeros(ZN, A, 3)
+        coords = torch.zeros(ZN, A, 3, device=device)
 
         # Build backbone with approximate bond lengths
         for i in range(ZN):
             # N-CA bond ~1.46A, CA-C bond ~1.52A, C-O bond ~1.23A
             # Place residues ~3.8A apart along extended chain
             base_x = i * 3.8
-            coords[i, 0] = torch.tensor([base_x, 0.0, 0.0]) + torch.randn(3) * 0.1  # N
-            coords[i, 1] = torch.tensor([base_x + 1.46, 0.0, 0.0]) + torch.randn(3) * 0.1  # CA
-            coords[i, 2] = torch.tensor([base_x + 2.98, 0.0, 0.0]) + torch.randn(3) * 0.1  # C
-            coords[i, 3] = torch.tensor([base_x + 3.21, 1.23, 0.0]) + torch.randn(3) * 0.1  # O
+            coords[i, 0] = torch.tensor([base_x, 0.0, 0.0], device=device) + torch.randn(3, device=device) * 0.1  # N
+            coords[i, 1] = torch.tensor([base_x + 1.46, 0.0, 0.0], device=device) + torch.randn(3, device=device) * 0.1  # CA
+            coords[i, 2] = torch.tensor([base_x + 2.98, 0.0, 0.0], device=device) + torch.randn(3, device=device) * 0.1  # C
+            coords[i, 3] = torch.tensor([base_x + 3.21, 1.23, 0.0], device=device) + torch.randn(3, device=device) * 0.1  # O
 
         # Create amino acid labels (random selection from canonical amino acids)
-        labels = torch.tensor([aa_2_lbl('A'), aa_2_lbl('C'), aa_2_lbl('D')])
+        labels = torch.tensor([aa_2_lbl('A'), aa_2_lbl('C'), aa_2_lbl('D')], device=device)
 
         # Create atom mask (only backbone atoms present for this simple test)
-        atom_mask = torch.zeros(ZN, A)
+        atom_mask = torch.zeros(ZN, A, device=device)
         atom_mask[:, :4] = 1.0  # Only backbone atoms are present
 
         return coords, labels, atom_mask
@@ -104,14 +104,14 @@ class TestTokenizer:
             z = frames[i, 2, :]
 
             # Check unit length
-            assert torch.allclose(torch.linalg.norm(x), torch.tensor(1.0), atol=1e-5)
-            assert torch.allclose(torch.linalg.norm(y), torch.tensor(1.0), atol=1e-5)
-            assert torch.allclose(torch.linalg.norm(z), torch.tensor(1.0), atol=1e-5)
+            assert abs(torch.linalg.norm(x).item() - 1.0) < 1e-5
+            assert abs(torch.linalg.norm(y).item() - 1.0) < 1e-5
+            assert abs(torch.linalg.norm(z).item() - 1.0) < 1e-5
 
             # Check orthogonality
-            assert torch.allclose(torch.dot(x, y), torch.tensor(0.0), atol=1e-5)
-            assert torch.allclose(torch.dot(y, z), torch.tensor(0.0), atol=1e-5)
-            assert torch.allclose(torch.dot(z, x), torch.tensor(0.0), atol=1e-5)
+            assert abs(torch.dot(x, y).item()) < 1e-5
+            assert abs(torch.dot(y, z).item()) < 1e-5
+            assert abs(torch.dot(z, x).item()) < 1e-5
 
         # Check that origin is at virtual Cb
         torch.testing.assert_close(origins, C_backbone[:, 3], atol=1e-5, rtol=1e-5)
@@ -199,8 +199,8 @@ class TestTokenizer:
         # Verify frames are orthonormal
         for i in range(3):
             x, y, z = local_frames[i, 0], local_frames[i, 1], local_frames[i, 2]
-            assert torch.allclose(torch.linalg.norm(x), torch.tensor(1.0), atol=1e-5)
-            assert torch.allclose(torch.dot(x, y), torch.tensor(0.0), atol=1e-5)
+            assert abs(torch.linalg.norm(x).item() - 1.0) < 1e-5
+            assert abs(torch.dot(x, y).item()) < 1e-5
 
     def test_no_grad_forward(self, small_tokenizer, sample_protein):
         """Test that forward pass does not track gradients."""
@@ -243,7 +243,7 @@ class TestTokenizer:
         # Divergence should be different
         assert not torch.allclose(div_full, div_partial)
 
-    def test_batch_processing(self, small_tokenizer):
+    def test_batch_processing(self, small_tokenizer, device):
         """Test processing multiple residues in batch."""
         torch.manual_seed(123)
 
@@ -252,9 +252,9 @@ class TestTokenizer:
         A = 14
 
         # Create simple extended chain with random perturbations
-        coords = torch.randn(ZN, A, 3) * 5.0
-        labels = torch.randint(0, 20, (ZN,))
-        atom_mask = torch.zeros(ZN, A)
+        coords = torch.randn(ZN, A, 3, device=device) * 5.0
+        labels = torch.randint(0, 20, (ZN,), device=device)
+        atom_mask = torch.zeros(ZN, A, device=device)
         atom_mask[:, :4] = 1.0
 
         # Should process without error
@@ -265,7 +265,7 @@ class TestTokenizer:
         assert local_frames.shape == (ZN, 3, 3)
         
 
-    def test_deterministic_output(self, small_tokenizer):
+    def test_deterministic_output(self, small_tokenizer, device):
         """Test that tokenizer output is deterministic (no randomness)."""
         torch.manual_seed(999)
         np.random.seed(999)
@@ -273,9 +273,9 @@ class TestTokenizer:
         # Create sample protein
         ZN = 3
         A = 14
-        coords = torch.randn(ZN, A, 3) * 5.0
-        labels = torch.randint(0, 20, (ZN,))
-        atom_mask = torch.zeros(ZN, A)
+        coords = torch.randn(ZN, A, 3, device=device) * 5.0
+        labels = torch.randint(0, 20, (ZN,), device=device)
+        atom_mask = torch.zeros(ZN, A, device=device)
         atom_mask[:, :4] = 1.0
 
         # Run twice with same input
