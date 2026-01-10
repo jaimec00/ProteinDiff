@@ -9,6 +9,9 @@ platforms = ["linux-64"]
 cpu = { features = ["cpu"] , solve-group = "cpu" }
 gpu = { features = ["gpu"] , solve-group = "gpu" }
 
+[activation.env]
+CUDA_HOME = "$CONDA_PREFIX"
+
 [tasks]
 # Training tasks
 train = "python proteindiff/training/train/train.py --config config/train.yml"
@@ -42,19 +45,19 @@ jaxtyping = "*"
 proteindiff = { path = ".", editable = true }
 
 [feature.cpu]
-# CPU-only environment
-[feature.cpu.dependencies]
-pytorch = { version = ">=2.9,<2.10" }
 
 [feature.gpu]
 # GPU environment with CUDA support
 channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
 platforms = ["linux-64"]
 
+[feature.gpu.system-requirements]
+cuda = "12"
+
 [feature.gpu.dependencies]
-pytorch = { version = ">=2.9,<2.10" }
-cuda = ">=12.8,<12.9"
+cuda = ">=12.9,<12.10"
+cuda-toolkit = ">=12.9,<12.10"
 
 # [feature.gpu.pypi-dependencies]
-# flash-attn = { git = "https://github.com/Dao-AILab/flash-attention.git", rev = "5059fd5" }
+flash-attn = ">=2.8"
 
