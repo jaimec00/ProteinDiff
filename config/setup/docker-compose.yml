@@ -5,7 +5,7 @@ x-common: &common
   gpus: all # or "gpus: 1" for a single GPU
   working_dir: /ProteinDiff
   volumes: # mounts
-    - ${PWD}/src:/ProteinDiff/src # source code
+    - ${PWD}/proteindiff:/ProteinDiff/proteindiff # source code
     - ${PWD}/config/train.yml:/ProteinDiff/config/train.yml # training config
     - ${DATA_PATH}:/mnt/data:ro # data
     - ${EXP_PATH}:/mnt/experiments # training experiments
@@ -13,7 +13,7 @@ x-common: &common
   environment:
     DATA_PATH: /mnt/data
     EXP_PATH: /mnt/experiments
-    PYTHONPATH: "/ProteinDiff/src"
+    PYTHONPATH: "/ProteinDiff"
 
 
 services:
@@ -24,4 +24,4 @@ services:
     command: /bin/bash -l -i  # run a shell
   train:
     <<: *common
-    command: python src/training/train/train.py --config config/train.yml
+    command: python proteindiff/training/train/train.py --config config/train.yml
