@@ -19,3 +19,4 @@ pdb_2021aug02_sample/
 *.egg-info
 .pytest_cache
 .pixi
+pixi.lock
