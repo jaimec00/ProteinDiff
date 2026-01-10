@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Notes
+
+always use `pixi run -e cpu/gpu ...` to run commands to ensure you are in the right environment (docker setup not tested yet)
+prefer using dataclass for configs and field(default_factory=) for default kwargs. 
+
 ## Project Overview
 
 ProteinDiff is a **multimodal protein generative model** that understands and generates proteins conditioned on partial sequence and/or partial structure. The model uses **Mixture of Queries (MoQ)** to compress variable-length protein representations into fixed-size latent vectors, enabling flexible conditional generation and latent space manipulation.
