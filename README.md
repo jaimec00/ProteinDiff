@@ -24,24 +24,11 @@ A multimodal protein generative model that understands and generates proteins co
 
 ## Setup
 
-Pull the docker image:
+We use pixi for this repo, so just run
 
-```shell
-sudo docker pull jaimec00/proteindiff:cu12.8-sm80
-sudo docker tag jaimec00/proteindiff:cu12.8-sm80 proteindiff:dev
-```
+`pixi shell`
 
-Or build for sm90:
-
-```shell
-sudo docker build -t proteindiff:dev -f config/setup/Dockerfile .
-```
-
-Run the environment:
-
-```shell
-./config/setup/start.sh <train/debug>
-```
+to drop into an interactive environment
 
 Download training data (ProteinMPNN dataset):
 
@@ -51,9 +38,3 @@ wget https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz -P $DATA_PA
 tar -xzf $DATA_PATH/pdb_2021aug02.tar.gz -C $DATA_PATH && \
 rm $DATA_PATH/pdb_2021aug02.tar.gz
 ```
-
-Configure `config/setup/.env`:
-
-```
-DATA_PATH=/path/to/data
-EXP_PATH=/path/where/experiments/are/written/to
