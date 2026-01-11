@@ -15,7 +15,6 @@ class EncoderCfg:
     resnet: ResNetModelCfg = field(default_factory = ResNetModelCfg)
     mpnn: MPNNModelCfg = field(default_factory = MPNNModelCfg)
     transformer: TransformerModelCfg = field(default_factory = TransformerModelCfg)
-    latent_projection: LatentProjectionCfg = field(default_factory = LatentProjectionCfg)
 
 class Encoder(Base):
     def __init__(self, cfg: EncoderCfg):
@@ -23,7 +22,6 @@ class Encoder(Base):
         self.resnet = ResNetModel(cfg.resnet)
         self.mpnn = MPNNModel(cfg.mpnn)
         self.transformer = TransformerModel(cfg.transformer)
-        self.latent_projection = LatentProjection(cfg.latent_projection)
 
 
     def forward(
@@ -42,6 +40,5 @@ class Encoder(Base):
         x = rearrange(x, "ZN d_model 1 1 1 -> ZN (d_model 1 1 1)")
         x = self.mpnn(bb_coords, frames, seq_idx, chain_idx, sample_idx, x)
         x = self.transformer(x, cu_seqlens, max_seqlen)
-        latent, mean, logvar = self.sample_latent(x)
-
-        return latent, mean, logvar
+        
+        return x
