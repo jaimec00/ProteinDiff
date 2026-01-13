@@ -9,14 +9,21 @@ description:	utility classes for training proteusAI
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
 
-from tqdm import tqdm
 import os
+import hydra
+from tqdm import tqdm
+from hydra.utils import instantiate
+from dataclasses import dataclass, field
+from omegaconf import OmegaConf as om, DictConfig
 
-from model import ProteinDiff
-from training.logger import Output
-from training.data.data_loader import DataHolder
-from training.train.training_run_utils import Epoch, Batch
-from training.losses import TrainingRunLosses
+from proteindiff.model import ProteinDiff
+from proteindiff.model.ProteinDiff import ProteinDiffCfg
+from proteindiff.training.logger import Logger, LoggerCfg
+from proteindiff.training.data.data_loader import DataHolder, DataHolderCfg
+from proteindiff.training.losses import TrainingRunLosses, TrainingRunLossesCfg
+from proteindiff.training.optim import OptimCfg
+from proteindiff.training.scheduler import SchedulerCfg
+from proteindiff.static.constants import TrainingStage
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -25,171 +32,103 @@ torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+@dataclass
+class TrainingRunCfg:
+	model: ProteinDiffCfg
+	data: DataHolderCfg
+	logger: LoggerCfg
+	losses: TrainingRunLossesCfg
+	optim: OptimCfg
+	scheduler: SchedulerCfg
+
+	train_stage: TrainingStage
+	epochs: int = 10 # TODO: change to steps
+	accumulation_steps: int = 1
+	grad_clip_norm: float = 5.0
+	#TODO: add other stuff relevant to train (keep simple for now)
+
 class TrainingRun:
 
-	def __init__(self, args: Box) -> None:
+	def __init__(self, cfg: TrainingRunCfg) -> None:
 
-		self.gpu = torch.device(f'cuda')
+		self.gpu = torch.device('cuda' if torch.cuda.is_available() else "cpu")
 		self.cpu = torch.device("cpu")
-		self.debug = args.debug_grad
+		self.cfg = cfg
 
-		self.setup_training(args)
+		self.setup_training()
 		self.train()
 		self.test()
 
 		# done
-		self.log("Fin", fancy=True)
+		self.log("fin", fancy=True)
 
-	def setup_training(self, args):
-		'''
-		sets up the training by setting up the model, optimizer, scheduler, loss 
-		function, scaler (if using AMP), and losses
+	def setup_training(self):
 
-		Args:
-			None
-
-		Returns:
-			None
-		'''
-
-		self.hyper_parameters = args.hyper_parameters
-		self.training_parameters = args.training_parameters
-		
-		self.data = DataHolder(	args.data.data_path, # single chain or multichain
-								num_train=args.data.num_train, num_val=args.data.num_val, num_test=args.data.num_test, 
-								batch_tokens=args.data.batch_tokens, min_seq_size=args.data.min_seq_size, max_seq_size=args.data.max_seq_size, 
-								max_resolution=args.data.max_resolution, homo_thresh=args.training_parameters.regularization.homo_thresh, 
-								asymmetric_units_only=self.training_parameters.train_type=="vae", # vae and classifier dont have residues communicate, no need for copies
-								num_workers=args.data.num_workers, prefetch_factor=args.data.prefetch_factor, rng_seed=args.data.rng_seed, buffer_size=args.data.buffer_size
-							)
-		
-		self.losses = TrainingRunLosses(	args.training_parameters.train_type,
-											args.training_parameters.loss.label_smoothing, 
-											args.training_parameters.loss.beta,
-										)
-
-		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints)
-
-		self.checkpoint = torch.load(self.training_parameters.checkpoint.path, weights_only=True, map_location=self.gpu) if self.training_parameters.checkpoint.path else ""
-
-		self.scaler = torch.GradScaler("cuda", init_scale=32) if args.training_parameters.use_amp else None # start small, have it adjust later to avoid overflow early on 
+		self.data = DataHolder(self.cfg.data)
+		self.losses = TrainingRunLosses(self.cfg.losses)
+		self.logger = Logger(self.cfg.logger)
 
 		self.setup_model()
 		self.setup_optim()
 		self.setup_scheduler()
 
-		self.output.log_trainingrun(self.training_parameters, self.hyper_parameters, self.data)
-
 	def setup_model(self):
-		'''
-		instantiates proteusAI with given Hyper-Parameters, moves it to gpu, 
-		optionally loads model weights from pre-trained models, and freezes modules
-		depending on train type
-
-		Args:
-			None
-		
-		Returns:
-			None
-		'''
 		
 		self.log("loading model...")
-		
-		self.model = ProteinDiff(	d_model=self.hyper_parameters.d_model, 
-									d_diffusion=self.hyper_parameters.d_diffusion, 
-									d_latent=self.hyper_parameters.d_latent, 
-									top_k=self.hyper_parameters.top_k, 
-									voxel_dims=self.hyper_parameters.voxel_dims, 
-									cell_dim=self.hyper_parameters.cell_dim,
-									vae_layers=self.hyper_parameters.vae_layers,
-									diff_layers=self.hyper_parameters.diff_layers,
-									diff_parameterization=self.hyper_parameters.diff_parameterization,
-									class_layers=self.hyper_parameters.class_layers
-								)
-		# parallelize the model
-		self.model.to(self.gpu)
-
-		# load any checkpoints
-		if self.checkpoint:
-			state_dicts = self.checkpoint["model"]
-			if self.training_parameters.checkpoint.vae:
-				self.model.vae.load_state_dict(state_dicts["vae"])
-				self.model.classifier.load_state_dict(state_dicts["classifier"])
-			if self.training_parameters.checkpoint.diff:
-				self.model.diffusion.load_state_dict(state_dicts["diffusion"])
-
-		self.model.eval()
-		if self.training_parameters.train_type=="diffusion": # freeze vae if in diffusion
-			for param in self.model.vae.parameters():
-				param.requires_grad = False
-
-
-		# get number of parameters for logging
-		self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
+		with self.gpu:
+			self.model = ProteinDiff(self.cfg.model)
 
 	def setup_optim(self):
-		'''
-		sets up the optimizer, zeros out the gradient
-
-		Args:
-			None
-		
-		Returns:
-			None
-		'''
-
-		self.log("Loading Optimizer...")
-		self.optim = torch.optim.AdamW(	self.model.parameters(), lr=1.0,
-										betas=(self.training_parameters.adam.beta1, self.training_parameters.adam.beta2), 
-										eps=float(self.training_parameters.adam.epsilon), weight_decay=self.training_parameters.adam.weight_decay)
+		self.log("loading optimizer...")
+		self.optim = torch.optim.AdamW(
+			self.model.parameters(),
+			lr=1.0, # will use LambaLR instead
+			betas=(self.cfg.optim.beta1, self.cfg.optim.beta2), 
+			eps=self.cfg.optim.eps, 
+			weight_decay=self.cfg.optim.weight_decay
+		)
 		self.optim.zero_grad()
-		if self.checkpoint and self.training_parameters.checkpoint.adam:
-			self.optim.load_state_dict(self.checkpoint["adam"])
 
 	def setup_scheduler(self):
-		'''
-		sets up the loss scheduler, right now only using ReduceLROnPlateu, but planning on making this configurable
 
-		Args:
-			None
-		
-		Returns:
-			None
-		'''
+		self.log("loading scheduler...")
 
-		self.log("Loading Scheduler...")
-
-		if self.training_parameters.lr.lr_type == "attn":
+		if self.cfg.scheduler.lr_type == "attn":
 
 			# compute the scale
-			if self.training_parameters.lr.lr_step == 0.0:
-				scale = self.hyper_parameters.d_model**(-0.5)
+			if self.cfg.scheduler.lr_step == 0.0:
+				scale = self.cfg.scheduler.d_model**(-0.5)
 			else:
-				scale = self.training_parameters.lr.warmup_steps**(0.5) * self.training_parameters.lr.lr_step # scale needed so max lr is what was specified
+				scale = self.cfg.scheduler.warmup_steps**(0.5) * self.cfg.scheduler.lr_step # scale needed so max lr is what was specified
 
 			def attn(step):
 				'''lr scheduler from attn paper'''
 				step = step # in case job gets cancelled and want to start from where left off
-				return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.lr.warmup_steps**(-1.5)))
+				return scale * min((step+1)**(-0.5), (step+1)*(self.scheduler.warmup_steps**(-1.5)))
 
 			self.scheduler = lr_scheduler.LambdaLR(self.optim, attn)
 
-		elif self.training_parameters.lr.lr_type == "static":
+		elif self.cfg.scheduler.lr_type == "static":
 			def static(step):
-				return self.training_parameters.lr.lr_step
+				return self.cfg.scheduler.lr_step
 			self.scheduler = lr_scheduler.LambdaLR(self.optim, static)
 
 		else:
-			raise ValueError(f"invalid lr_type: {self.training_parameters.lr.lr_type}. options are ['attn', 'static']")
-
-		if self.checkpoint and self.training_parameters.checkpoint.sched:
-			self.scheduler.load_state_dict(self.checkpoint["scheduler"])
+			raise ValueError(f"invalid lr_type: {self.cfg.scheduler.lr_type}. options are ['attn', 'static']")
 
 	def model_checkpoint(self, epoch_idx):
-		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
-			self.output.save_checkpoint(self.model, adam=self.optim, scheduler=self.scheduler, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
+		if (epoch_idx+1) % self.logger.model_checkpoints == 0: # model checkpointing
+			self.output.save_checkpoint(appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
+
+	def save_checkpoint(self, appended_str=""):
+		# TODO: implement checkpointing
+		checkpoint = {}
+		checkpoint_path = self.logger.out_path / f"checkpoint_{appended_str}.pth"
+		torch.save(checkpoint, checkpoint_path)
+		self.log.info(f"checkpoint saved to {checkpoint_path}")
 
 	def training_converged(self, epoch_idx):
+		# TODO check this out
 
 		criteria = self.losses.val.losses[list(self.losses.val.losses.keys())[0]]
 
@@ -218,25 +157,53 @@ class TrainingRun:
 		runs testing and saves the model
 		'''
 
-		# log training info
-		self.log(f"\n\nInitializing training. "\
-					f"Training on approx. {len(self.data.train)} batches "\
-					f"of batch size {len(self.data.train)} tokens "\
-					f"for {self.training_parameters.epochs} epochs.\n" 
-				)
+		self.log(
+			f"\n\nInitializing training. "
+			f"Training on approx. {len(self.data.train)} clusters "
+			f"for {self.cfg.epochs} epochs.\n" 
+		)
 		
 		# loop through epochs
-		for epoch_idx in range(self.training_parameters.epochs):
+		for epoch_idx in range(self.cfg.epochs):
 
-			# initialize epoch and loop through batches
-			epoch = Epoch(self, epoch_idx)
-			epoch.epoch_loop()
+			# TODO: mae a helper to only set non-frozen models to train
+			# make sure in training mode
+			self.model.train()
+
+			# setup the epoch # TODO: helper for get last lr
+			self.logger.log_epoch(epoch_idx, self.scheduler.last_epoch, self.scheduler.get_last_lr()[0])
+
+			# clear temp losses
+			self.losses.clear_tmp_losses()
+
+			# init epoch pbar # TODO check the total arg is right
+			epoch_pbar = tqdm(total=len(self.data.train), desc="training progress", unit="step")
+
+			# loop through batches
+			for b_idx, data_batch in enumerate(self.data.train):
+
+				# learn
+				self.batch_learn(data_batch)
+
+				# update pbar
+				epoch_pbar.update(1)
 			
+			# log epoch losses and save avg 
+			epoch_losses = self.losses.tmp.get_avg()
+			self.logger.log_losses(epoch_losses)
+			losses.train.add_losses(losses_dict)
+
+			# run validation
+			self.validation()
+			
+			# checkpoint
 			self.model_checkpoint(epoch_idx)
+
+			# early stopping
 			if self.training_converged(epoch_idx): break
 			
 		# announce trainnig is done
-		self.log(f"Training Done After {epoch.epoch} Epochs", fancy=True)
+		self.log(f"training finished after {epoch.epoch} epochs", fancy=True)
 
 		# plot training losses
 		self.output.plot_training(self.losses)
@@ -244,6 +211,7 @@ class TrainingRun:
 		# save the model
 		self.output.save_checkpoint(self.model, self.optim, self.scheduler, appended_str="final")
 
+	@torch.no_grad()
 	def validation(self):
 		
 		# switch to evaluation mode to perform validation
@@ -252,72 +220,150 @@ class TrainingRun:
 		# clear losses for this run
 		self.losses.clear_tmp_losses()
 
-		# dummy epoch so can still access training run parent
-		dummy_epoch = Epoch(self)
+		# progress bar # TODO: check len is right here
+		val_pbar = tqdm(total=len(self.data.val), desc="validation progress", unit="step")
 
-		# progress bar
-		val_pbar = tqdm(total=len(self.data.val_data), desc="Validation Progress", unit="Step")
+		# loop through validation batches
+		for data_batch in self.data.val:
 				
-		# turn off gradient calculation
-		with torch.no_grad():
+			# run the model
+			self.batch_forward(data_batch)
 
-			# loop through validation batches
-			for data_batch in self.data.val_data:
-					
-				# init batch
-				batch = Batch(data_batch, epoch=dummy_epoch)
+			val_pbar.update(1)
 
-				# run the model
-				batch.batch_forward()
+		# log the losses
+		val_losses = self.losses.tmp.get_avg()
+		self.output.log_losses(test_losses)
+		self.losses.add_losses(val_losses)
 
-				val_pbar.update(1)
-
-			# add the avg losses to the global loss and log
-			self.output.log_val_losses(self.losses)
-
+	@torch.no_grad()
 	def test(self):
 
 		# switch to evaluation mode
 		self.model.eval()
 
-		self.log("Starting Testing", fancy=True)
+		# log
+		self.log("starting testing", fancy=True)
 		
-		# load testing data
-		self.log("Loading Testing Data...")
-		self.data.load("test")
-
 		# init losses
 		self.losses.set_inference_losses(self.training_parameters.train_type)
 
-		# dummy epoch so can still access training run parent
-		dummy_epoch = Epoch(self)
-
 		# progress bar
-		test_pbar = tqdm(total=len(self.data.test_data), desc="Test Progress", unit="Step")
+		test_pbar = tqdm(total=len(self.data.test), desc="test progress", unit="step")
 
-		# turn off gradient calculation
-		with torch.no_grad():
+		# loop through testing batches
+		for data_batch in self.data.test:
+				
+			# run the model
+			self.batch_forward(data_batch)
 
-			# loop through testing batches
-			for data_batch in self.data.test_data:
-					
-				# init batch
-				batch = Batch(  data_batch,
-								temp=self.training_parameters.inference.temperature,
-								inference=True, epoch=dummy_epoch
-							)
-
-				# run the model
-				batch.batch_forward()
-
-				# update pbar
-				test_pbar.update(1)
+			# update pbar
+			test_pbar.update(1)
 		
 		# log the losses
-		self.output.log_test_losses(self.losses)
+		test_losses = self.losses.tmp.get_avg()
+		self.output.log_losses(test_losses)
+		self.losses.extend_losses(test_losses)
 
 	def log(self, message, fancy=False):
 		if fancy:
 			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
+		self.logger.log.info(message)
 
-		self.output.log.info(message)
+
+	def batch_learn(self, data_batch, b_idx):
+		'''
+		a single iteration over a batch.
+		'''
+
+		# forward pass
+		self.batch_forward(data_batch)
+
+		# backward pass
+		self.batch_backward(data_batch, b_idx)
+
+	def batch_forward(self, data_batch):
+		'''
+		performs the forward pass, gets the outputs and computes the losses of a batch. 
+		'''
+		
+		# move batch to gpu
+		data_batch.move_to(self.model.device)
+
+		# for vae training
+		if self.cfg.train_type==TrainingStage.VAE:
+			
+			coords_bb, divergence, local_frames = self.model.tokenizer(data_batch.coords, data_batch.labels, data_batch.atom_mask)
+			
+			(
+				latent,
+				mu, logvar,
+				divergence_pred, 
+				seq_pred,
+				distogram, 
+				anglogram, 
+				t, x, y, sin, cos,
+				plddt, pae, 
+			) = model.vae(
+				divergence=divergence,
+				coords_bb=coords_bb,
+				frames=local_frames,
+				seq_idx=data_batch.seq_idx,
+				chain_idx=data_batch.chain_idx,
+				sample_idx=data_batch.sample_idx,
+				cu_seqlens=data_batch.cu_seqlens,
+				max_seqlen=data_batch.max_seqlen,
+			)
+				
+			# compute loss
+			losses = self.losses.loss_fn.vae(
+				latent_mu, 
+				latent_logvar, 
+				divergence_pred, 
+				divergence, 
+				seq_pred, data_batch.labels,
+				data_batch.coords, coords_bb, frames,
+				t, x, y, 
+				sin, cos,
+				plddt, pae,
+				data_batch.sample_idx
+			)
+
+		# diffusion training
+		elif self.cfg.train_type==TrainingStage.DIFFUSION:
+			# TODO: implement
+			pass
+
+		# add the losses to the temporary losses
+		self.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())
+
+	def batch_backward(self, data_batch, b_idx):
+
+		loss = self.losses.tmp.get_last_loss() 
+		loss.backward()
+
+		learn_step = (b_idx + 1) % self.cfg.accumulation_steps == 0
+		if learn_step:
+		
+			# grad clip
+			if self.grad_clip_norm:
+				torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
+
+			# step
+			self.optim.step()
+			self.scheduler.step()
+			self.optim.zero_grad()
+
+
+@hydra.main(version_base=None, config_path="../../../configs", config_name="debug")
+def main(cfg: DictConfig):
+	# build model from simple cfg
+	from proteindiff.utils.cfg_utils.model_cfg_utils import build_model_cfg_from_simple_cfg
+	simple_model_cfg = instantiate(cfg.model)
+	model_cfg = build_model_cfg_from_simple_cfg(simple_model_cfg)
+	cfg.model = om.structured(model_cfg)
+	
+	TrainingRun(cfg)
+
+if __name__ == "__main__":
+	main()

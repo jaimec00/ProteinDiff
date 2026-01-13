@@ -14,100 +14,35 @@ import torch
 import math
 import sys
 import numpy as np
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import warnings
+import shutil 
+from dataclasses import dataclass
+from hydra.core.hydra_config import HydraConfig
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-class Output():
+@dataclass
+class LoggerCfg:
+	out_path: str = ""
+	experiment_name: str = "debug"
+	overwrite: bool = False
 
-	def __init__(self, out_path, model_checkpoints=10):
+class Logger():
 
-		self.out_path = Path(out_path)
-		self.out_path.mkdir(parents=True, exist_ok=True)
+	def __init__(self, cfg: LoggerCfg):
 
-		self.plot_path = self.out_path / Path("plots")
+		self.out_path = Path(HydraConfig.get().runtime.output_dir)
+		self.plot_path = self.out_path / "plots"
+		self.log = logging.getLogger(__name__)
 
-		self.log = self.setup_logging(self.out_path / Path("log.txt"))
-		self.model_checkpoints = model_checkpoints
-
-	def setup_logging(self, log_file):
-
-		logger = logging.getLogger("ProteinDiff_log")
-		logger.setLevel(logging.DEBUG)
-
-		formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-		file_handler = logging.FileHandler(log_file, mode="w")
-		file_handler.setLevel(logging.DEBUG)
-		file_handler.setFormatter(formatter)
-
-		console_handler = logging.StreamHandler(sys.stdout)
-		console_handler.setLevel(logging.DEBUG)
-		console_handler.setFormatter(formatter)
-
-		logger.addHandler(file_handler)
-		logger.addHandler(console_handler)
-
-		return logger
-
-	def log_trainingrun(self, training_parameters, hyper_parameters, data):
+	def log_trainingrun(self):
 		'''basically just prints the config file w/ a little more info'''
 
+		# TODO: implement this once the config format is locked down
 		log = 	textwrap.dedent(f'''
-
-		total parameters: {training_parameters.num_params:,}
-		
-		model hyper-parameters:
-
-			d_model: {hyper_parameters.d_model}  
-			d_latent: {hyper_parameters.d_latent} 
-			top_k: {hyper_parameters.top_k}  
-			voxel_dims: {hyper_parameters.voxel_dims}
-			cell_dim: {hyper_parameters.cell_dim} 
-			vae_layers: {hyper_parameters.vae_layers}
-			diff_layers: {hyper_parameters.diff_layers}
-
-		data:
-  			data_path: {data.data_path}
-			dataset split ({data.num_train + data.num_val + data.num_test:,} clusters total): 
-				train clusters: {data.num_train:,}
-				validation clusters: {data.num_val:,}
-				test clusters: {data.num_test:,}
-			batch size (tokens): {data.batch_tokens:,}
-			max batch size (samples): {data.max_batch_size:,}
-			min sequence length (tokens): {data.min_seq_size:,}
-			max sequence length (tokens): {data.max_seq_size:,}
-			effective batch size (tokens): {data.batch_tokens * training_parameters.loss.accumulation_steps}
-
-		training-parameters:
-			epochs: {training_parameters.epochs}
-			use autocast: {training_parameters.use_amp}
-			checkpoint:
-				checkpoint_path: {training_parameters.checkpoint.path}
-			inference:
-				temperature: {training_parameters.inference.temperature}
-			early_stopping:
-				thresh: {training_parameters.early_stopping.thresh} 
-				tolerance: {training_parameters.early_stopping.tolerance}
-			adam:
-				beta1: {training_parameters.adam.beta1}
-				beta2: {training_parameters.adam.beta2}
-				epsilon: {training_parameters.adam.epsilon}
-			regularization:
-				dropout: {training_parameters.regularization.dropout}
-				noise_coords_std: {training_parameters.regularization.noise_coords_std}
-				homo_thresh: {training_parameters.regularization.homo_thresh}
-			loss:
-				accumulation_steps: {training_parameters.loss.accumulation_steps} batches
-				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
-				label_smoothing: {training_parameters.loss.label_smoothing}
-				beta: {training_parameters.loss.beta}
-
-			lr:
-				lr_type: {training_parameters.lr.lr_type}
-				lr_step: {training_parameters.lr.lr_step}
-				warmup_steps: {training_parameters.lr.warmup_steps}
-		
-		output directory: {self.out_path}
+			nothing rn
 		''')
 
 		self.log.info(log)
@@ -124,28 +59,12 @@ class Output():
 		''')
 		)
 
-	def log_losses(self, losses, mode):
+	def log_losses(self, losses_dict):
 
-		losses_dict = losses.tmp.get_avg()
 		for loss_type, loss in losses_dict.items():
-			self.log.info(f"{mode} {loss_type} Per Token: {str(loss)}")	
+			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
 		self.log.info("")
-		
-		if mode == "Train":
-			losses.train.add_losses(losses_dict)
-		elif mode == "Validation":	
-			losses.val.add_losses(losses_dict)
-		else: # testing
-			losses.test.extend_losses(losses.tmp)
-
-	def log_epoch_losses(self, losses):
-		self.log_losses(losses, "Train")
-
-	def log_val_losses(self, losses):
-		self.log_losses(losses, "Validation")
-
-	def log_test_losses(self, losses):
-		self.log_losses(losses, "Test")
+	
 
 	def plot_training(self, losses):
 
@@ -172,18 +91,5 @@ class Output():
 			plt.savefig(loss_path)
 			self.log.info(f"Plot of {loss_type} vs. Epochs saved to {loss_path}")
 			plt.figure()
-
-	def save_checkpoint(self, model, adam=None, scheduler=None, appended_str=""):
-
-		checkpoint = {	"model": {	"vae": model.vae.state_dict(), 
-									"diffusion": model.diffusion.state_dict(), 
-									"classifier": model.classifier.state_dict(),
-						},
-						"adam": (None if adam is None else adam.state_dict()), 
-						"scheduler": (None if scheduler is None else scheduler.state_dict())
-					}
-		checkpoint_path = self.out_path / Path(f"checkpoint_{appended_str}.pth")
-		torch.save(checkpoint, checkpoint_path)
-		self.log.info(f"checkpoint saved to {checkpoint_path}")
 
 # ----------------------------------------------------------------------------------------------------------------------

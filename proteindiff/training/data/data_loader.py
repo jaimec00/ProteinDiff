@@ -5,31 +5,58 @@ from __future__ import annotations
 from torch.utils.data import IterableDataset, DataLoader
 import torch
 
-from typing import Generator
+from typing import Generator, Tuple, Any
 from multiprocessing import Value as shared_val
 from pathlib import Path
+from dataclasses import dataclass, field
 import pandas as pd
 
-from training.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler
+from proteindiff.training.data.data_utils import Assembly, PDBCache, BatchBuilder, DataBatch, Sampler, PDBCacheCfg, SamplerCfg, BatchBuilderCfg
+
+@dataclass
+class DataHolderCfg:
+	data_path: Path
+	num_train: int = -1
+	num_val: int = -1
+	num_test: int = -1
+	batch_tokens: int = 16384
+	min_seq_size: int = 16
+	max_seq_size: int = 16384
+	max_resolution: float = 3.5
+	homo_thresh: float = 0.70
+	asymmetric_units_only: bool = False
+	num_workers: int = 8
+	prefetch_factor: int = 2
+	rng_seed: int = 42
+	buffer_size: int = 32
+
+@dataclass
+class DataCfg:
+	data_path: Path
+	clusters_df: pd.DataFrame
+	num_clusters: int = -1
+	batch_tokens: int = 16384
+	min_seq_size: int = 16
+	max_seq_size: int = 16384
+	homo_thresh: float = 0.70
+	asymmetric_units_only: bool = False
+	buffer_size: int = 32
+	seed: int = 42
+	epoch: Any = None
 
 class DataHolder:
 
 	'''
 	hold DataLoader Objects, one each for train, test and val
-	multi-chain (experimental structures): https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz 
+	multi-chain (experimental structures): https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz
 	'''
 
-	def __init__(self, 	data_path: str, 
-						num_train: int=-1, num_val: int=-1, num_test: int=-1, 
-						batch_tokens: int=16384, min_seq_size: int=16, max_seq_size: int=16384,
-						max_resolution: float=3.5, homo_thresh: float=0.70, asymmetric_units_only: bool=False,
-						num_workers: int=8, prefetch_factor: int=2, rng_seed: int=42, buffer_size: int=32
-					) -> None:
+	def __init__(self, config: DataHolderCfg) -> None:
 
 		# define data path and path to pdbs
-		data_path = Path(data_path)
-		pdb_path = data_path / Path("pdb")
-		train_info, val_info, test_info = self._get_splits(data_path)
+		data_path = Path(config.data_path)
+		pdb_path = data_path / "pdb"
+		train_info, val_info, test_info = self._get_splits(data_path, config.max_resolution)
 
 		# to increment the epoch
 		self._epoch = shared_val("I", 0) # uint32
@@ -37,26 +64,35 @@ class DataHolder:
 		def init_loader(df: pd.DataFrame, samples: int=-1) -> DataLoader:
 			'''helper to init a different loader for train val and test'''
 
-			data = Data(pdb_path, df, 
-						num_clusters=samples, batch_tokens=batch_tokens, min_seq_size=min_seq_size, max_seq_size=max_seq_size, 
-						homo_thresh=homo_thresh, asymmetric_units_only=asymmetric_units_only, buffer_size=buffer_size, seed=rng_seed, epoch=self._epoch
-						)
+			data = Data(DataCfg(
+				data_path=pdb_path,
+				clusters_df=df,
+				num_clusters=samples,
+				batch_tokens=config.batch_tokens,
+				min_seq_size=config.min_seq_size,
+				max_seq_size=config.max_seq_size,
+				homo_thresh=config.homo_thresh,
+				asymmetric_units_only=config.asymmetric_units_only,
+				buffer_size=config.buffer_size,
+				seed=config.rng_seed,
+				epoch=self._epoch
+			))
 
-			loader = DataLoader(data, batch_size=None, num_workers=num_workers, collate_fn=lambda x: x[0],
-								prefetch_factor=prefetch_factor if num_workers else None, persistent_workers=num_workers>0										
+			loader = DataLoader(data, batch_size=None, num_workers=config.num_workers, collate_fn=lambda x: x[0],
+								prefetch_factor=config.prefetch_factor if config.num_workers else None, persistent_workers=config.num_workers>0
 								)
 
 			return loader
 
 		# initialize the loaders
-		self.train = init_loader(train_info, num_train)
-		self.val = init_loader(val_info, num_val)
-		self.test = init_loader(test_info, num_test)
+		self.train = init_loader(train_info, config.num_train)
+		self.val = init_loader(val_info, config.num_val)
+		self.test = init_loader(test_info, config.num_test)
 
-	def _get_splits(self, data_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+	def _get_splits(self, data_path: Path, max_resolution: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 		# get the csv info, filter out anything above max res
-		clusters = pd.read_csv(data_path / Path("list.csv"), header=0, usecols=["CHAINID", "RESOLUTION", "CLUSTER"], engine="pyarrow") 
+		clusters = pd.read_csv(data_path / Path("list.csv"), header=0, usecols=["CHAINID", "RESOLUTION", "CLUSTER"], engine="python")
 		clusters = clusters.loc[clusters.RESOLUTION <= max_resolution, :]
 		clusters.pop("RESOLUTION") # only need this to filter by res
 
@@ -78,27 +114,30 @@ class DataHolder:
 			self._epoch.value += 1
 
 class Data(IterableDataset):
-	def __init__(self, 	data_path: Path, clusters_df: pd.DataFrame, 
-						num_clusters: int=-1, batch_tokens: int=16384,
-						min_seq_size: int=16, max_seq_size: int=16384, 
-						homo_thresh: float=0.70, asymmetric_units_only: bool=False, 
-						buffer_size: int=32, seed: int=42, epoch=None
-					) -> None:
+	def __init__(self, config: DataCfg) -> None:
 
 		super().__init__()
 
 		# keep a cache of pdbs
-		self._pdb_cache = PDBCache(	data_path, 
-									min_seq_size=min_seq_size, max_seq_size=max_seq_size, 
-									homo_thresh=homo_thresh, asymmetric_units_only=asymmetric_units_only
-									)
+		self._pdb_cache = PDBCache(PDBCacheCfg(
+			pdb_path=config.data_path,
+			min_seq_size=config.min_seq_size,
+			max_seq_size=config.max_seq_size,
+			homo_thresh=config.homo_thresh,
+			asymmetric_units_only=config.asymmetric_units_only
+		))
 
 		# for deterministic and UNIQUE sampling
-		self._sampler = Sampler(clusters_df, num_clusters, seed, epoch)
+		self._sampler = Sampler(config.clusters_df, SamplerCfg(
+			num_clusters=config.num_clusters,
+			seed=config.seed
+		), config.epoch)
 
-		# define sizes
-		self._batch_tokens = batch_tokens
-		self._buffer_size = buffer_size
+		# for batch building
+		self._batch_builder_config = BatchBuilderCfg(
+			batch_tokens=config.batch_tokens,
+			buffer_size=config.buffer_size
+		)
 
 	def _get_asmb(self, row: pd.Series) -> Assembly:
 
@@ -119,7 +158,7 @@ class Data(IterableDataset):
 		sampled_rows = self._sampler.sample_rows()
 
 		# init the batch builder
-		batch_builder = BatchBuilder(self._batch_tokens, self._buffer_size)
+		batch_builder = BatchBuilder(self._batch_builder_config)
 
 		# iterate through the sampled chains
 		for _, row in sampled_rows.iterrows():

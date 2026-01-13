@@ -7,28 +7,56 @@ import torch
 from typing import List, Dict, Tuple, Generator
 from bisect import insort
 from pathlib import Path
+from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 import hashlib
 import random
 
-from static.constants import aa_2_lbl, seq_2_lbls
+from proteindiff.static.constants import aa_2_lbl, seq_2_lbls
+
+@dataclass
+class SamplerCfg:
+	num_clusters: int = -1
+	seed: int = 42
+
+@dataclass
+class BatchBuilderCfg:
+	batch_tokens: int = 16384
+	buffer_size: int = 32
+
+@dataclass
+class PDBCacheCfg:
+	pdb_path: Path
+	min_seq_size: int = 16
+	max_seq_size: int = 16384
+	homo_thresh: float = 0.70
+	asymmetric_units_only: bool = False
+
+@dataclass
+class PDBDataCfg:
+	pdb: str
+	pdb_path: Path
+	min_seq_size: int = 16
+	max_seq_size: int = 16384
+	homo_thresh: float = 0.70
+	asymmetric_units_only: bool = False
 
 class Sampler:
-	def __init__(self, clusters_df: pd.DataFrame, num_clusters: int, seed: int, epoch: int) -> None:
-		self._base_seed = seed
+	def __init__(self, clusters_df: pd.DataFrame, cfg: SamplerCfg, epoch) -> None:
+		self._base_seed = cfg.seed
 		self._epoch = epoch
 		self._big_prime = 1_000_003
 
 		# init the df w/ cluster info
 		self._clusters_df = clusters_df
-		self._num_clusters = min(num_clusters if num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
+		self._num_clusters = min(cfg.num_clusters if cfg.num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
 
 	def _get_rand_state(self, rng: np.random.Generator) -> int:
 		return int(rng.integers(0, 2**32 - 1, dtype=np.uint32))
 
 	def _get_rng(self) -> np.random.Generator:
-		return np.default_rng((self._base_seed + self._epoch.value*self._big_prime) % 2**32)
+		return np.random.default_rng((self._base_seed + self._epoch.value*self._big_prime) % 2**32)
 
 	def _partition_pdbs(self, pdb: str, num_workers: int) -> int:
 		h = hashlib.blake2b(pdb.encode('utf-8'), digest_size=8, key=b'arbitrary_string_for_determinism').digest()
@@ -61,14 +89,14 @@ class Sampler:
 		return self._num_clusters
 
 class BatchBuilder:
-	def __init__(self, batch_tokens: int, buffer_size: int=32) -> None:
+	def __init__(self, cfg: BatchBuilderCfg) -> None:
 
 		# init buffer, batch, and token count
 		self._buffer = []
 		self._cur_batch = []
 		self._cur_tokens = 0
-		self._buffer_size = buffer_size
-		self._batch_tokens = batch_tokens
+		self._buffer_size = cfg.buffer_size
+		self._batch_tokens = cfg.batch_tokens
 
 	def add_sample(self, sample: Assembly) -> Generator[DataBatch]:
 		
@@ -127,7 +155,7 @@ class DataBatch:
 		trgt_mask = []
 		homo_mask = []
 
-		for idx, asmb in batch_list:
+		for idx, asmb in enumerate(batch_list):
 			
 			asmb.construct() # materialize the full tensors (including AU copies)
 
@@ -151,12 +179,22 @@ class DataBatch:
 		self.sample_idx = torch.cat(sample_idx, dim=0) # ZN
 		
 		self.atom_mask = torch.cat(atom_mask, dim=0)# ZN x 14
+
+		# not used, i dont think i need these anymore
 		self.trgt_mask = torch.cat(trgt_mask, dim=0)# ZN
 		self.homo_mask = torch.cat(homo_mask, dim=0)# ZN
 		
 		# other useful masks
 		self.coords_mask = self.atom_mask[:, :3].all(dim=-1) # means not missing any bb coords, ZN
 		self.caa_mask = self.labels!=aa_2_lbl("X") # non canonical amino acids, ZN
+		self.valid_mask = self.coords_mask & self.caa_mask
+		self.apply_mask(self.valid_mask)
+		
+	@torch.no_grad
+	def set_cu_seqlens(self):
+		_, self.seqlens = torch.unique_consecutive(self.sample_idx, return_counts=True)
+		self.cu_seqlens = torch.nn.functional.pad(seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
+		self.max_seqlen = seqlens.max(dim=0).values.item()
 
 	@torch.no_grad()
 	def apply_mask(self, mask: torch.Tensor) -> None:
@@ -170,32 +208,41 @@ class DataBatch:
 		self.homo_mask = self.homo_mask[mask]
 		self.coords_mask = self.coords_mask[mask]
 		self.caa_mask = self.caa_mask[mask]
+		self.valid_mask = self.valid_mask[mask]
+		self.set_cu_seqlens()
 
-	def get_cu_seqlens(self):
-		_, seqlens = torch.unique_consecutive(self.sample_idx, return_counts=True)
-		self.cu_seqlens = torch.nn.functional.pad(seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
-		self.max_seqlen = seqlens.max(dim=0).values.item()
+	def move_to(self, device: torch.device):
+		self.coords = self.coords.to(device)
+		self.labels = self.labels.to(device)
+		self.seq_pos = self.seq_pos.to(device)
+		self.chain_pos = self.chain_pos.to(device)
+		self.sample_idx = self.sample_idx.to(device)
+		self.atom_mask = self.atom_mask.to(device)
+		self.trgt_mask = self.trgt_mask.to(device)
+		self.homo_mask = self.homo_mask.to(device)
+		self.coords_mask = self.coords_mask.to(device)
+		self.caa_mask = self.caa_mask.to(device)		
+		self.seqlens = self.seqlens.to(device)
+		self.cu_seqlens = self.cu_seqlens.to(device)
+		self.max_seqlen = self.max_seqlen.to(device)
 
 	def __len__(self):
 		return self.labels.size(0)
 
 class PDBCache:
-	def __init__(self, 	pdb_path: Path, 
-						min_seq_size: int=16, max_seq_size: int=16384, 
-						homo_thresh: float=0.70, asymmetric_units_only: bool=False
-				) -> None:
+	def __init__(self, cfg: PDBCacheCfg) -> None: 
 		self._cache = {} # {pdb: pdb_data}
-		self._pdb_path = pdb_path
-		self._min_seq_size = min_seq_size
-		self._max_seq_size = max_seq_size
-		self._homo_thresh = homo_thresh
-		self._asymmetric_units_only = asymmetric_units_only
+		self._cfg = cfg
 
 	def _add_pdb(self, pdb: str) -> None:
-		self._cache[pdb] = PDBData(	pdb, self._pdb_path, 
-									min_seq_size=self._min_seq_size, max_seq_size=self._max_seq_size, 
-									homo_thresh=self._homo_thresh, asymmetric_units_only=self._asymmetric_units_only
-								)
+		self._cache[pdb] = PDBData(PDBDataCfg(
+			pdb=pdb,
+			pdb_path=self._cfg.pdb_path,
+			min_seq_size=self._cfg.min_seq_size,
+			max_seq_size=self._cfg.max_seq_size,
+			homo_thresh=self._cfg.homo_thresh,
+			asymmetric_units_only=self._cfg.asymmetric_units_only
+		))
 
 	def get_pdb(self, pdb: str) -> PDBData:
 		if pdb not in self._cache:
@@ -203,29 +250,26 @@ class PDBCache:
 		return self._cache[pdb]
 
 class PDBData:
-	def __init__(self, 	pdb: str, pdb_path: Path, 
-						min_seq_size: int=16, max_seq_size: int=16384, 
-						homo_thresh: float=0.70, asymmetric_units_only: bool=False
-					) -> None:
+	def __init__(self, cfg: PDBDataCfg) -> None:
 
 		# load the metadata
-		self._base_path = pdb_path / Path(pdb[1:3])
-		self._pdb = pdb
+		self._base_path = cfg.pdb_path / Path(cfg.pdb[1:3])
+		self._pdb = cfg.pdb
 		metadata = torch.load(self._base_path / Path(self._pdb + ".pt"), weights_only=True, map_location="cpu")
 
 		# remove any keys not used (most is just pdb metadata), convert to np if possible
 		removed_keys = {"method", "date", "resolution", "id", "asmb_details", "asmb_method", "asmb_ids"}
 		self._metadata = {key: (metadata[key].numpy() if isinstance(metadata[key], torch.Tensor) else metadata[key]) for key in metadata.keys() if key not in removed_keys}
-		
+
 		# change this to a dict instead of list
 		self._metadata["chains"] = {c: i for i, c in enumerate(self._metadata["chains"])}
 
 		# other stuff
 		self._chain_cache = {} # {chain: chain_data}
-		self._min_seq_size = min_seq_size
-		self._max_seq_size = max_seq_size
-		self._homo_thresh = homo_thresh
-		self._asymmetric_units_only = asymmetric_units_only
+		self._min_seq_size = cfg.min_seq_size
+		self._max_seq_size = cfg.max_seq_size
+		self._homo_thresh = cfg.homo_thresh
+		self._asymmetric_units_only = cfg.asymmetric_units_only
 
 	def sample_asmb(self, chain: str) -> Assembly:
 		
@@ -344,7 +388,7 @@ class Assembly:
 
 		# make the mask for trgt chain and for homomers
 		self.trgt_mask = self.chain_pos == self._trgt_chain
-		self.homo_mask = torch.isin(self.chain_pos, self._homo_chains)
+		self.homo_mask = torch.isin(self.chain_pos, torch.from_numpy(self._homo_chains) if isinstance(self._homo_chains, np.ndarray) else self._homo_chains)
 
 		# perform the xform
 		self._xform()

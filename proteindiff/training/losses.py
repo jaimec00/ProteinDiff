@@ -6,93 +6,81 @@ import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 import numpy as np
 import math
-from static.constants import canonical_aas
+
+from proteindiff.static.constants import canonical_aas
 from typing import Dict, List
-from model.utils.preprocesser import PreProcesser
+
+from dataclasses import dataclass, field
 
 # ----------------------------------------------------------------------------------------------------------------------
 # losses 
 
+@dataclass
+class LossFnCfg:
+	seq_lbl_smooth: float=0.0, 
+	dist_lbl_smooth: float=0.0, 
+	angle_lbl_smooth: float=0.0, 
+	kl_div_weight: float = 0.0,
+	div_mse_weight: float = 0.0,
+	seq_weight: float = 0.0,
+	distogram_weight: float = 0.0,
+	anglogram_weight: float = 0.0,
+	dist_weight: float = 0.0,
+	angle_weight: float = 0.0,
+	plddt_weight: float = 0.0,
+	pae_weight: float = 0.0,
+	dist_range: tuple[float, float] = (2.0, 22.0)
+
+@dataclass
+class TrainingRunLossesCfg:
+	train_type: str
+	loss_fn: LossFnCfg = field(default_factory = LossFnCfg)
+
 class TrainingRunLosses:
 
-	def __init__(self, train_type: str, 
-						sc_lbl_smooth: float=0.0, sc_beta: float=1e-6,
-						bb_dist_lbl_smooth: float=0.0, bb_angle_lbl_smooth: float=0.0, bb_seq_lbl_smooth: float=0.0,
-						bb_beta: float=1e-6, bb_min_dist: float=2.0, bb_max_dist: float=22.0 
-						) -> None:
+	def __init__(self, cfg: TrainingRunLossesCfg) -> None:
 
-		self.loss_function = LossFunction(	sc_lbl_smooth, sc_beta, 
-											bb_dist_lbl_smooth, bb_angle_lbl_smooth, bb_seq_lbl_smooth, 
-											bb_beta, bb_min_dist, bb_max_dist
-										)
-
-		self.train = Losses(train_type)
-		self.val = Losses(train_type)
-		self.test = Losses(train_type)
-		self.tmp = Losses(train_type)
+		self.loss_fn = LossFn(cfg.loss_fn)
+		self.train = LossHolder(cfg.train_type)
+		self.val = LossHolder(cfg.train_type)
+		self.test = LossHolder(cfg.train_type)
+		self.tmp = LossHolder(cfg.train_type)
 
 	def clear_tmp_losses(self) -> None:
 		self.tmp.clear_losses()
 
 	def set_inference_losses(self, train_type: str) -> None:
-
-		# inference mode only applicable after train vae and diffusion
-		if train_type=="diffusion": # run full inference
-			self.tmp.losses = {	"Cross Entropy Loss": [],
-								"Top 1 Accuracy": [],
-								"Top 3 Accuracy": [],
-								"Top 5 Accuracy": [],
-								"True AA Predicted Probability": []
-							}
-			self.test.losses = {	"Cross Entropy Loss": [],
-									"Top 1 Accuracy": [],
-									"Top 3 Accuracy": [],
-									"Top 5 Accuracy": [],
-									"True AA Predicted Probability": []
-								}
-		else:
-			self.clear_tmp_losses() # (sc/bb)_vae evaluation is the same as training
+		# TODO: implement
+		pass
 
 	def to_numpy(self) -> None:
 		self.train.to_numpy()
 		self.val.to_numpy()
 		self.test.to_numpy()
 
-class Losses:
+class LossHolder:
 	'''
 	class to store losses
 	'''
 	def __init__(self, train_type: str) -> None: 
 
-		if train_type=="sc_vae":
+		if train_type=="vae":
 			self.losses = {	
-							"Full Loss": [],
-							"KL Divergence": [],
-							"Mean Squared Error": [],
-							"Cross Entropy Loss": [],
-							"Accuracy": [],
-							"True AA Predicted Probability": []
-						}
-		elif train_type=="bb_vae":
-			self.losses = {	
-							"Full Loss": [],
-
-							"KL Divergence": [],
-							
-							"Distogram Cross Entropy Loss": [],
-							"Distogram Accuracy": [],
-							"True DistBin Predicted Probability": [],
-							
-							"Anglogram Cross Entropy Loss": [],
-							"Anglogram Accuracy": [],
-							"True AngleBin Predicted Probability": [],
-							
-							"Sequence Cross Entropy Loss": [],
-							"Sequence Accuracy": [],
-							"True AA Predicted Probability": []
-						}
+				"full_loss": [],
+				"kl_div": [],
+				"div_mse": [],
+				"seq_cel": [],		
+				"seq_accuracy": [],
+				"seq_probs": [],
+				"distogram_cel": [],					
+				"anglogram_cel": [],
+				"dist_loss": [], 
+				"angle_loss": [], 
+				"plddt_loss": [], 
+				"pae_loss": [],
+			}
 		elif train_type=="diffusion":
-			self.losses = {"Mean Squared Error": []}
+			self.losses = {"diffusion_mse": []}
 		
 		# to scale losses for logging, does not affect backprop
 		self.valid_toks = 0 # valid tokens to compute avg per token
@@ -133,131 +121,168 @@ class Losses:
 		return len(self.losses[list(self.losses.keys())[0]])
 
 # ----------------------------------------------------------------------------------------------------------------------
-# loss functions 
+# loss functions
 
-class LossFunction:
 
-	def __init__(self, sc_lbl_smooth: float=0.0, sc_beta: float=1e-6,
-						bb_dist_lbl_smooth: float=0.0, bb_angle_lbl_smooth: float=0.0, bb_seq_lbl_smooth: float=0.0,
-						bb_beta: float=1e-6, bb_min_dist: float=2.0, bb_max_dist: float=22.0 
-				):
-		self._sc_seq_cel = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=sc_lbl_smooth)
-		self._bb_seq_cel = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=bb_seq_lbl_smooth)
-		self._bb_dist_cel = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=bb_dist_lbl_smooth)
-		self._bb_angle_cel = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=bb_angle_lbl_smooth)
-		self._sc_beta = sc_beta
-		self._bb_beta = bb_beta
+class LossFn:
+
+	def __init__(self, cfg: LossFnCfg):
+		self.seq_cel = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=cfg.seq_lbl_smooth)
+		self.dist_cel = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=cfg.dist_lbl_smooth)
+		self.angle_cel = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=cfg.angle_lbl_smooth)
 		
-		self._bb_min_dist = bb_min_dist
-		self._bb_max_dist = bb_max_dist
+		# weights
+		self.kl_div_weight = cfg.kl_div_weight
+		self.div_mse_weight = cfg.div_mse_weight
+		self.seq_weight = cfg.seq_weight
+		self.distogram_weight = cfg.distogram_weight
+		self.anglogram_weight = cfg.anglogram_weight
+		self.dist_weight = cfg.dist_weight
+		self.angle_weight = cfg.angle_weight
+		self.plddt_weight = cfg.plddt_weight
+		self.pae_weight = cfg.pae_weight
 
-	def sc_vae(self, latent_mean: torch.Tensor, latent_logvar: torch.Tensor, 
-					voxels_pred: torch.Tensor, voxels_true: torch.Tensor, 
-					seq_pred: torch.Tensor, seq_true: torch.Tensor, 
-					mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+		self.min_dist, self.max_dist = cfg.dist_range
 
-		kl_div = self._kl_div(latent_mean, latent_logvar, mask)
-		mse = self._mse(voxels_pred, voxels_true, mask)
-		cel = self._seq_cel(seq_pred, seq_true, mask, mode="sc")
-		matches = self._compute_matches(seq_pred, seq_true, mask)
-		probs = self._compute_probs(seq_pred, seq_true, mask)
+	def vae(
+		self, 
+		latent_mean: torch.Tensor, 
+		latent_logvar: torch.Tensor, 
+		
+		voxels_pred: torch.Tensor, 
+		voxels_true: torch.Tensor, 
+		
+		seq_pred: torch.Tensor, 
+		seq_true: torch.Tensor, 
+		
+		distogram_pred,
+		anglogram_pred,
 
-		full_loss = self._sc_beta*kl_div + mse + cel
+		coords_true, coords_bb_true, frames_true,
+		t, x, y,
+		sin, cos,
+		plddt, pae,
+		sample_idx,
 
-		losses = {	"Full Loss": full_loss,
-					"KL Divergence": kl_div,
-					"Mean Squared Error": mse,
-					"Cross Entropy Loss": cel,					
-					"Accuracy": matches,
-					"True AA Predicted Probability": probs
-				}
+	) -> Dict[str, torch.Tensor]:
+
+		# latent loss
+		kl_div = self.kl_div(latent_mean, latent_logvar)
+
+		# reconstruction loss
+		div_mse = self.mse(voxels_pred, voxels_true)
+
+		# inverse folding loss (+ others)
+		seq_cel, matches, probs = self.seq_loss(seq_pred, seq_true)
+
+		# distogram and anglogram loss
+		distogram_cel, anglogram_cel = self.coarse_struct_loss(distogram_pred, anglogram_pred, coords_bb, sample_idx)
+
+		# full struct loss
+		dist_loss, angle_loss, plddt_loss, pae_loss = self.fine_struct_loss(
+			coords_true, 
+			coords_bb_true, 
+			frames_true, 
+			t, 
+			x, 
+			y, 
+			sin, 
+			cos, 
+			plddt, 
+			pae,
+			sample_idx,
+		)
+
+		full_loss = (
+			self.kl_div_weight*kl_div 
+			+ self.div_mse_weight*div_mse
+			+ self.seq_weight*seq_cel
+			+ self.distogram_weight*distogram_cel
+			+ self.anglogram_weight*anglogram_cel
+			+ self.dist_weight*dist_loss
+			+ self.angle_weight*angle_loss
+			+ self.plddt_weight*plddt_loss
+			+ self.pae_weight*pae_loss
+		)
+
+		losses = {	
+			"full_loss": full_loss,
+			"kl_div": kl_div,
+			"div_mse": div_mse,
+			"seq_cel": seq_cel,		
+			"seq_accuracy": matches,
+			"seq_probs": probs,
+			"distogram_cel": distogram_cel,					
+			"anglogram_cel": anglogram_cel,
+			"dist_loss": dist_loss, 
+			"angle_loss": angle_loss, 
+			"plddt_loss": plddt_loss, 
+			"pae_loss": pae_loss,
+		}
 
 		return losses
 
-	def bb_vae(self, latent_mean: torch.Tensor, latent_logvar: torch.Tensor, 
-					distogram: torch.Tensor, anglogram: torch.Tensor, coords: torch.Tensor,
-					seq_pred: torch.Tensor, seq_true: torch.Tensor, 
-					sample_idx: torch.Tensor, mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+	def fine_struct_loss(
+		coords_true, 
+		coords_bb_true, 
+		frames_true, 
+		t, 
+		x, 
+		y, 
+		sin, 
+		cos, 
+		plddt, 
+		pae,
+		sample_idx,
+	):
+	
+		# TODO: implement this
+		return dist_loss.sum()*0, angle_loss.sum()*0, plddt_loss.sum()*0, pae_loss.sum()*0
 
-		kl_div = self._kl_div(latent_mean, latent_logvar, mask)
-		dist_loss, angle_loss = self._struct_cel(distogram, anglogram, coords, sample_idx, mask)
-		seq_loss = self._seq_cel(seq_pred, seq_true, mask, mode="bb")
-		matches = self._compute_matches(seq_pred, seq_true, mask)
-		probs = self._compute_probs(seq_pred, seq_true, mask)
 
-		full_loss = self._bb_beta*kl_div + dist_loss + angle_loss + seq_loss
-
-		losses = {	"Full Loss": full_loss,
-					"KL Divergence": kl_div,
-					"Distogram Cross Entropy Loss": dist_loss,					
-					"Anglogram Cross Entropy Loss": angle_loss,					
-					"Sequence Cross Entropy Loss": seq_loss,					
-					"Accuracy": matches,
-					"True AA Predicted Probability": probs
-				}
-
+	def diffusion(self, pred: torch.Tensor, trgt: torch.Tensor) -> torch.Tensor:
+		mse = self.mse(pred, trgt)
+		losses = {"diffusion_mse": mse}
 		return losses
 
-	def diffusion(self, pred: torch.Tensor, trgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		mse = self._mse(pred, trgt, mask)
-		losses = {"Mean Squared Error": mse}
-
-		return losses
-
-	def inference(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		cel = self._seq_cel(seq_pred, seq_true, mask)
-		matches = self._compute_matches(seq_pred, seq_true, mask)
-		probs = self._compute_probs(seq_pred, seq_true, mask)
-
-		losses = {	"Cross Entropy Loss": cel,					
-					"Accuracy": matches,
-					"True AA Predicted Probability": probs
-				}
-
-		return losses
-
-	def _broadcast_to(self, mask: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
-		'''reshapes a ZN mask so that it can be broadcast to other shape'''
-		return mask.reshape(mask.size(0), *((1,)*(other.dim()-1)))
-
-	def _kl_div(self, z_mu: torch.Tensor, z_logvar: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		kl_div = -0.5*(1 + z_logvar - z_mu**2 - torch.exp(z_logvar))*self._broadcast_to(mask, z_logvar)
+	def kl_div(self, z_mu: torch.Tensor, z_logvar: torch.Tensor) -> torch.Tensor:
+		kl_div = -0.5*(1 + z_logvar - z_mu**2 - torch.exp(z_logvar))
 		return kl_div.sum()
 
-	def _mse(self, pred: torch.Tensor, trgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		squared_err = ((pred - trgt)**2) * self._broadcast_to(mask, pred)
+	def mse(self, pred: torch.Tensor, trgt: torch.Tensor) -> torch.Tensor:
+		squared_err = ((pred - trgt)**2)
 		mse = squared_err.sum() / torch.tensor(pred.shape[1:], device=pred.device).prod()
 		return mse
 
-	def _seq_cel(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor, mode: str="sc") -> torch.Tensor:
-		match mode:
-			case "sc": criteria = self._sc_seq_cel
-			case "bb": criteria = self._bb_seq_cel
-			case "-": raise ValueError(f"mode must be one of [sc, bb], not {mode}")
-		seq_true = seq_true.masked_fill(~mask, -1)
-		cel = criteria(seq_pred, seq_true)
-		return cel
+	def seq_loss(self, seq_pred: torch.Tensor, seq_true: torch.Tensor) -> torch.Tensor:
+		cel = self.seq_cel(seq_pred, seq_true)
+		matches = self.compute_matches(seq_pred, seq_true)
+		probs = self.compute_probs(seq_pred, seq_true)
+		return cel, matches, probs
 
-	def _struct_cel(self, distogram: torch.Tensor, anglogram: torch.Tensor, coords: torch.Tensor, sample_idx: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor]:
+	def compute_matches(self, seq_pred: torch.Tensor, seq_true: torch.Tensor) -> torch.Tensor:
+		'''greedy selection'''
+		return (torch.argmax(seq_pred, dim=-1) == seq_true).sum() # 1, 
+
+	def compute_probs(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+		probs = torch.softmax(seq_pred, dim=-1)
+		probs_sum = (torch.gather(probs, -1, seq_true.unsqueeze(-1))).sum()
+		return probs_sum
+
+	def coarse_struct_loss(self, distogram: torch.Tensor, anglogram: torch.Tensor, coords_bb: torch.Tensor, sample_idx: torch.Tensor) -> Tuple[torch.Tensor]:
 		
 		# get Cb position and CaCb unit vec
-		Cb, CaCb = self._get_Cb_and_CaCb(coords)
-
-		# get ZN,ZN pairwise mask
-		pw_mask = self._get_pw_mask(mask, sample_idx)
+		Cb, CaCb = self.get_Cb_and_CaCb(coords_bb)
 
 		# distogram loss
-		dist_loss = self._dist_cel(distogram, Cb, pw_mask)
+		dist_loss = self.distogram_cel(distogram, Cb)
 
 		# anglogram loss
-		angle_loss = self._angle_cel(anglogram, CaCb, pw_mask)
+		angle_loss = self.anglogram_cel(anglogram, CaCb)
 
 		return dist_loss, angle_loss
 
-	def _get_Cb_and_CaCb(self, coords: torch.Tensor) -> Tuple[torch.Tensor]:
-
-		# get backbone
-		coords_bb = PreProcesser.get_backbone(coords)
+	def get_Cb_and_CaCb(self, coords_bb: torch.Tensor) -> Tuple[torch.Tensor]:
 
 		# extract Ca and Cb coords
 		Ca, Cb = coords_bb[:, 1, :], coords_bb[:, 3, :]
@@ -267,32 +292,30 @@ class LossFunction:
 
 		return Cb, CaCb
 
-	def _get_pw_mask(self, mask: torch.Tensor, sample_idx: torch.Tensor) -> torch.Tensor:
-		return (mask.unsqueeze(0) & mask.unsqueeze(1)) & (sample_idx.unsqueeze(0) == sample_idx.unsqueeze(1))
 
-	def _dist_cel(self, distogram, Cb, mask):
+	def distogram_cel(self, distogram, Cb):
 		dist_bins = distogram.size(-1)
-		distogram_true = self._get_dist_lbl(Cb, dist_bins, mask)
-		dist_loss = self._struct_reduce_cel(distogram, distogram_true, mask, mode="dist")
+		distogram_true = self.get_dist_lbl(Cb, dist_bins, mask)
+		dist_loss = self.struct_reduce_cel(distogram, distogram_true, mask, mode="distogram")
 		return dist_loss
 
-	def _angle_cel(self, anglogram, CaCb, mask):
+	def anglogram_cel(self, anglogram, CaCb):
 		angle_bins = anglogram.size(-1)
-		anglogram_true = self._get_angle_lbl(CaCb, angle_bins, mask)
-		angle_loss = self._struct_reduce_cel(anglogram, anglogram_true, mask, mode="angle")
+		anglogram_true = self.get_angle_lbl(CaCb, angle_bins, mask)
+		angle_loss = self.struct_reduce_cel(anglogram, anglogram_true, mask, mode="anglogram")
 		return angle_loss
 
-	def _get_dist_lbl(self, Cb: torch.Tensor, bins: int, mask: torch.Tensor) -> torch.Tensor:
+	def get_dist_lbl(self, Cb: torch.Tensor, bins: int) -> torch.Tensor:
 
 		# get distogram bins
-		dist_bins = torch.linspace(self._bb_min_dist, self._bb_max_dist, bins, device=Cb.device) # bins,
+		dist_bins = torch.linspace(self.min_dist, self.max_dist, bins, device=Cb.device) # bins,
 
 		# compute true distances
 		true_dists = torch.linalg.vector_norm(Cb.unsqueeze(1) - Cb.unsqueeze(0), dim=-1) # ZN, ZN
 
-		return self._get_lbl(true_dists, dist_bins, mask)
+		return self.get_lbl(true_dists, dist_bins, mask)
 
-	def _get_angle_lbl(self, CaCb: torch.Tensor, bins: int, mask: torch.Tensor) -> torch.Tensor:
+	def get_angle_lbl(self, CaCb: torch.Tensor, bins: int) -> torch.Tensor:
 
 		# get anglogram bins
 		angle_bins = torch.linspace(-1, 1, bins, device=CaCb.device) # bins,
@@ -300,40 +323,30 @@ class LossFunction:
 		# compute true distances
 		true_angles = torch.linalg.vecdot(CaCb.unsqueeze(1), CaCb.unsqueeze(0), dim=-1) # ZN, ZN
 
-		return self._get_lbl(true_angles, angle_bins, mask)
+		return self.get_lbl(true_angles, angle_bins, mask)
 
-	def _get_lbl(self, true, bins, mask):
+	def get_lbl(self, true, bins):
 
 		# get the labels
 		true_lbl = torch.argmin((true.unsqueeze(-1) - bins.reshape(1,1,-1)).abs(), dim=-1) # ZN, ZN
 
-		# ignore masked positions
-		true_lbl.masked_fill_(~mask, -1)
-
 		return true_lbl
 
-	def _struct_reduce_cel(self, pred: torch.Tensor, true: torch.Tensor, mask: torch.Tensor, mode="dist"):
+	def struct_reduce_cel(self, pred: torch.Tensor, true: torch.Tensor, mode="distogram"):
 
 		# choose criteria
 		match mode:
-			case "dist": criteria = self._bb_dist_cel
-			case "angle": criteria = self._bb_angle_cel
+			case "distogram": criteria = self.distogram_cel
+			case "anglogram": criteria = self.anglogram_cel
 			case "-": raise ValueError(f"mode must be one of [dist, angle], not {mode}")
 
 		# compute cel, no reduction
 		cel = criteria(pred.reshape(-1, pred.size(-1)), true.reshape(-1)).reshape(pred.shape[:-1]) # ZN,ZN
 
 		# get average for each token
-		cel = cel.sum(dim=-1) / mask.sum(dim=-1).clamp(min=1) # ZN,
+		# TODO: sum for now, but want avg of each token, need logic for ZN tensors
+		cel = cel.sum(dim=-1) 
 
 		# sum the averages
 		return cel.sum()
 
-	def _compute_matches(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		'''greedy selection'''
-		return ((torch.argmax(seq_pred, dim=-1).reshape(-1) == seq_true) & mask).sum() # 1, 
-
-	def _compute_probs(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-		probs = torch.softmax(seq_pred, dim=-1)
-		probs_sum = (mask.unsqueeze(-1)*torch.gather(probs, -1, (seq_true*mask).unsqueeze(-1))).sum()
-		return probs_sum
