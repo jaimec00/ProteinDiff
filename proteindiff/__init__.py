@@ -1,2 +1,6 @@
-from .model import *
-from .static import *
+from . import model, static
+
+__all__ = [
+    "model",
+    "static"
+]
