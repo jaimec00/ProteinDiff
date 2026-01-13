@@ -1,0 +1,17 @@
+defaults:
+  - /model: simple
+  - /data: default
+  - /logger: default
+  - /losses: vae
+  - /optim: adam
+  - /scheduler: static
+  - hydra
+  - _self_
+
+_target_: proteindiff.training.train.training_run.TrainingRunCfg
+
+# training params
+train_stage: vae
+epochs: 10
+accumulation_steps: 1
+grad_clip_norm: 5.0

@@ -1,0 +1,6 @@
+_target_: proteindiff.training.optim.OptimCfg
+
+beta1: 0.9
+beta2: 0.999
+eps: 1.0e-8
+weight_decay: 1.0e-2

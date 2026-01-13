@@ -1,7 +1,7 @@
 [workspace]
 name = "ProteinDiff"
-version = "0.1.0"
-description = "Multimodal protein generative model using Mixture of Queries and latent diffusion"
+version = "0.0.1"
+description = "Multimodal protein generative model"
 channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
 platforms = ["linux-64"]
 
@@ -9,34 +9,19 @@ platforms = ["linux-64"]
 cpu = { features = ["cpu"] , solve-group = "cpu" }
 gpu = { features = ["gpu"] , solve-group = "gpu" }
 
-[activation.env]
-CUDA_HOME = "$CONDA_PREFIX"
-
-[tasks]
-# Training tasks
-train = "python proteindiff/training/train/train.py --config config/train.yml"
-
-# Testing tasks
-test = "pytest proteindiff/tests/"
-test-verbose = "pytest proteindiff/tests/ -v"
-
-# Development tasks
-shell = "bash"
-
 [dependencies]
 python = ">=3.12"
 pytorch = ">=2.9,<2.10"
 pip = "*"
 numpy = "*"
 pandas = "*"
-requests = "*"
 pathlib = "*"
 biopython = "1.84.*"
 tqdm = "*"
 matplotlib = "*"
 einops = "*"
-
-# Development dependencies
+omegaconf = "*"
+hydra-core = "*"
 pytest = "*"
 
 [pypi-dependencies]
@@ -47,7 +32,6 @@ proteindiff = { path = ".", editable = true }
 [feature.cpu]
 
 [feature.gpu]
-# GPU environment with CUDA support
 channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
 platforms = ["linux-64"]
 
@@ -56,8 +40,5 @@ cuda = "12"
 
 [feature.gpu.dependencies]
 cuda = ">=12.9,<12.10"
-cuda-toolkit = ">=12.9,<12.10"
-
-# [feature.gpu.pypi-dependencies]
 flash-attn = ">=2.8"
 
