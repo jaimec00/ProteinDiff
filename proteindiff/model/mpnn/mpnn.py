@@ -1,15 +1,16 @@
 
-from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
-from proteindiff.model import Base
-from proteindiff.model.utils.mlp import (
+from dataclasses import dataclass, field
+
+from proteindiff.model.base import Base
+from proteindiff.model.model_utils.mlp import (
 	MLP, MLPCfg,
-	MPNNMLP, MPNNMLPCfg, 
+	MPNNMLP, MPNNMLPCfg,
 	FFN, FFNCfg
 )
-from proteindiff.typing import Float, Int, Bool, T, Tuple
+from proteindiff.types import Float, Int, Bool, T, Tuple, List
 
 
 
@@ -95,8 +96,8 @@ class EdgeEncoderCfg:
 	num_rbf: int = 16
 	edge_mlp: MPNNMLPCfg = field(default_factory = MPNNMLPCfg)
 
-class EdgeEncoder(nn.Module):
-	def __init__(self, cfg: EdgeEncoderCfg = field(default_factory=EdgeEncoderCfg)):
+class EdgeEncoder(Base):
+	def __init__(self, cfg: EdgeEncoderCfg):
 		super().__init__()
 
 		self.top_k = cfg.top_k
@@ -232,18 +233,19 @@ class EdgeEncoder(nn.Module):
 
 @dataclass
 class MPNNModelCfg:
-	edge_encoder_cfg: EdgeEncoderCfg = field(default_factory=EdgeEncoderCfg)
-	blocks: list = field(default_factory=lambda: [MPNNBlockCfg()])
+	edge_encoder: EdgeEncoderCfg = field(default_factory=EdgeEncoderCfg)
+	mpnn_block: MPNNBlockCfg = field(default_factory=MPNNBlockCfg)
+	layers: int = 4
 
 
-class MPNNModel(nn.Module):
-	def __init__(self, cfg: MPNNModelCfg = field(default_factory=MPNNModelCfg)):
+class MPNNModel(Base):
+	def __init__(self, cfg: MPNNModelCfg):
 		super().__init__()
 
-		self.edge_encoder = EdgeEncoder(cfg=cfg.edge_encoder_cfg)
+		self.edge_encoder = EdgeEncoder(cfg=cfg.edge_encoder)
 		self.mpnn_blocks = nn.ModuleList([
-			MPNNBlock(block_cfg)
-			for block_cfg in cfg.blocks
+			MPNNBlock(cfg.mpnn_block)
+			for _ in range(cfg.layers)
 		])
 
 	def forward(

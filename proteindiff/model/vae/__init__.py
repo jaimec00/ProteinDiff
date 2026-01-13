@@ -1,16 +1,14 @@
-from .vae_utils import (
-    ResNetModel, 
-    ResNetModelCfg, 
-    ResNetBlock, 
-    ResNetBlockCfg
-)
+from . import vae_utils
 from .encoder import Encoder, EncoderCfg
+from .decoder import Decoder, DecoderCfg
+from .vae import VAEModel, VAEModelCfg
 
 __all__ = [
-    "ResNetModel",
-    "ResNetModelCfg",
-    "ResNetBlock",
-    "ResNetBlockCfg",
+    "vae_utils"
     "Encoder",
     "EncoderCfg"
+    "Decoder",
+    "DecoderCfg"
+    "VAEModel", 
+    "VAEModelCfg",
 ]

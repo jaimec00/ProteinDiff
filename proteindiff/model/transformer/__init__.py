@@ -6,7 +6,7 @@ from .transformer import (
 
 __all__ = [
     "MHA", 
-    "MHACfg"
+    "MHACfg",
     "TransformerBlock", 
     "TransformerBlockCfg",
     "TransformerModel", 

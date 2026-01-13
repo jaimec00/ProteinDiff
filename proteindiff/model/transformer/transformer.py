@@ -3,10 +3,10 @@ import torch.nn as nn
 
 from dataclasses import dataclass, field
 
-from proteindiff.model import Base
-from proteindiff.model.transformer import MHA, MHACfg
-from proteindiff.model.utils import FFN, FFNCfg
-from proteindiff.typing import Float, Int, T, List
+from proteindiff.model.base import Base
+from proteindiff.model.transformer.attention import MHA, MHACfg
+from proteindiff.model.model_utils.mlp import FFN, FFNCfg
+from proteindiff.types import Float, Int, T, List
 
 
 @dataclass
@@ -25,9 +25,9 @@ class TransformerBlock(Base):
 		self.ffn_norm = nn.LayerNorm(cfg.d_model)
 
 	def forward(
-		self, 
-		x: Float[T, "ZN d_model"], 
-		cu_seqlens: Int[T, "Z"], 
+		self,
+		x: Float[T, "ZN d_model"],
+		cu_seqlens: Int[T, "Z+1"],
 		max_seqlen: int,
 		) -> Float[T, "ZN d_model"]:
 		x1 = self.attn(x, cu_seqlens, max_seqlen)
@@ -36,22 +36,24 @@ class TransformerBlock(Base):
 		x = self.ffn_norm(x+x1)
 		return x
 
+
 @dataclass
 class TransformerModelCfg:
-	blocks: List[TransformerBlockCfg] = field(default_factory=lambda: [TransformerBlockCfg])
+	transformer_block: TransformerBlockCfg = field(default_factory = TransformerBlockCfg)
+	layers: int = 4
 
 class TransformerModel(Base):
 	def __init__(self, cfg: TransformerModelCfg):
 		super().__init__()
 		self.blocks = nn.ModuleList([
-			TransformerBlock(block)
-			for block in cfg.blocks
+			TransformerBlock(cfg.transformer_block)
+			for _ in range(cfg.layers)
 		])
 
 	def forward(
-		self, 
-		x: Float[T, "ZN d_model"], 
-		cu_seqlens: Int[T, "Z"], 
+		self,
+		x: Float[T, "ZN d_model"],
+		cu_seqlens: Int[T, "Z+1"],
 		max_seqlen: int,
 		) -> Float[T, "ZN d_model"]:
 
@@ -59,3 +61,4 @@ class TransformerModel(Base):
 			x = block(x, cu_seqlens, max_seqlen)
 
 		return x
+

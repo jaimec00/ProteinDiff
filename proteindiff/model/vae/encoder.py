@@ -4,24 +4,29 @@ import torch.nn as nn
 from dataclasses import dataclass, field
 from einops import rearrange
 
-from proteindiff.model import Base
-from proteindiff.model.vae.vae_utils import ResNetModel, ResNetModelCfg
-from proteindiff.model.mpnn import MPNNModel, MPNNModelCfg
-from proteindiff.model.transformer import TransformerModel, TransformerModelCfg
-from proteindiff.typing import Float, Int, Bool, T
+from proteindiff.model.base import Base
+from proteindiff.model.vae.vae_utils import (
+    DownsampleModel, DownsampleModelCfg, 
+    LatentProjectionHead, LatentProjectionHeadCfg,
+)
+from proteindiff.model.mpnn.mpnn import MPNNModel, MPNNModelCfg
+from proteindiff.model.transformer.transformer import TransformerModel, TransformerModelCfg
+from proteindiff.types import Float, Int, Bool, T
 
 @dataclass
 class EncoderCfg:
-    resnet: ResNetModelCfg = field(default_factory = ResNetModelCfg)
+    downsample: DownsampleModelCfg = field(default_factory = DownsampleModelCfg)
     mpnn: MPNNModelCfg = field(default_factory = MPNNModelCfg)
     transformer: TransformerModelCfg = field(default_factory = TransformerModelCfg)
+    latent_projection_head: LatentProjectionHeadCfg = field(default_factory = LatentProjectionHeadCfg)
 
 class Encoder(Base):
     def __init__(self, cfg: EncoderCfg):
         super().__init__()
-        self.resnet = ResNetModel(cfg.resnet)
+        self.downsample = DownsampleModel(cfg.downsample)
         self.mpnn = MPNNModel(cfg.mpnn)
         self.transformer = TransformerModel(cfg.transformer)
+        self.latent_projection_head = LatentProjectionHead(cfg.latent_projection_head)
 
 
     def forward(
@@ -32,13 +37,13 @@ class Encoder(Base):
         seq_idx: Int[T, "ZN"],
         chain_idx: Int[T, "ZN"],
         sample_idx: Int[T, "ZN"],
-        cu_seqlens: Int[T, "Z"],
+        cu_seqlens: Int[T, "Z+1"],
         max_seqlen: int,
-    ) -> Float[T, "ZN d_model"]:
+    ) -> tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
 
-        x = self.resnet(divergence)
-        x = rearrange(x, "ZN d_model 1 1 1 -> ZN (d_model 1 1 1)")
+        x = self.downsample(divergence)
         x = self.mpnn(bb_coords, frames, seq_idx, chain_idx, sample_idx, x)
         x = self.transformer(x, cu_seqlens, max_seqlen)
+        latent, mu, logvar = self.latent_projection_head(x)
         
-        return x
+        return latent, mu, logvar

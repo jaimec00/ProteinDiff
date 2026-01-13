@@ -2,16 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Tuple
 from dataclasses import dataclass
 
-from proteindiff.model import Base
+from proteindiff.model.base import Base
 from proteindiff.static.constants import amber_partial_charges, aa_2_lbl
+from proteindiff.types import Tuple, Float, Int, Bool, T
 
 @dataclass
 class TokenizerCfg:
-	voxel_dim: int = 16
-	cell_dim: int = 1.0
+	voxel_dim: int = 8
+	cell_dim: float = 1.0
 
 class Tokenizer(Base):
 	
@@ -29,7 +29,12 @@ class Tokenizer(Base):
 		self.res = cfg.cell_dim
 
 	@torch.no_grad()
-	def forward(self, C: torch.Tensor, L: torch.Tensor, atom_mask: torch.Tensor) -> Tuple[torch.Tensor]:
+	def forward(
+		self,
+		C: Float[T, "ZN 14 3"],
+		L: Int[T, "ZN"],
+		atom_mask: Bool[T, "ZN 14"]
+	) -> Tuple[Float[T, "ZN 4 3"], Int[T, "ZN 1 Vx Vy Vz"], Float[T, "ZN 3 3"]]:
 		'''
 		C (torch.Tensor): full atomic coordinates of shape (ZN,A,3)
 		L (torch.Tensor): amino acid class labels of shape (ZN)
@@ -56,7 +61,7 @@ class Tokenizer(Base):
 
 	@staticmethod
 	@torch.no_grad()
-	def get_backbone(C):
+	def get_backbone(C: Float[T, "ZN 14 3"]) -> Float[T, "ZN 4 3"]:
 
 		n = C[:, 0, :]
 		ca = C[:, 1, :]
@@ -72,11 +77,11 @@ class Tokenizer(Base):
 
 		return C_backbone
 
-	def _norm(self, vec):
+	def _norm(self, vec: Float[T, "..."]) -> Float[T, "..."]:
 		return F.normalize(vec, p=2, dim=-1, eps=1e-8)
 
 	@torch.no_grad()
-	def compute_frames(self, C_backbone):
+	def compute_frames(self, C_backbone: Float[T, "ZN 4 3"]) -> Tuple[Float[T, "ZN 3"], Float[T, "ZN 3 3"]]:
 
 		# split the backbone atoms
 		n, ca, c, cb = torch.chunk(C_backbone, dim=1, chunks=4)
@@ -99,7 +104,11 @@ class Tokenizer(Base):
 		return origin, frames
 
 	@torch.no_grad()
-	def compute_voxels(self, origins, frames):
+	def compute_voxels(
+		self,
+		origins: Float[T, "ZN 3"],
+		frames: Float[T, "ZN 3 3"]
+	) -> Float[T, "ZN Vx Vy Vz 3"]:
 
 		ZN, S = origins.shape
 		_, U, _ = frames.shape # U is the unit vectors dim
@@ -114,7 +123,13 @@ class Tokenizer(Base):
 		return local_voxels
 		
 	@torch.no_grad()
-	def compute_fields(self, C, L, voxels, atom_mask):
+	def compute_fields(
+		self,
+		C: Float[T, "ZN 14 3"],
+		L: Int[T, "ZN"],
+		voxels: Float[T, "ZN Vx Vy Vz 3"],
+		atom_mask: Bool[T, "ZN 14"]
+	) -> Float[T, "ZN 3 Vx Vy Vz"]:
 
 		# prep
 		ZN = L.size(0)
@@ -155,7 +170,7 @@ class Tokenizer(Base):
 		return fields
 
 	@torch.no_grad()
-	def compute_divergence(self, fields):
+	def compute_divergence(self, fields: Float[T, "ZN 3 Vx Vy Vz"]) -> Int[T, "ZN 1 Vx Vy Vz"]:
 
 		'''
 		compute divergence of the electric field. field is normed so each cell has unit magnitude

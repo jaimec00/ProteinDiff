@@ -1,4 +1,5 @@
-from .tokenizer import Tokenizer
+from .tokenizer import Tokenizer, TokenizerCfg
 __all__ = [
-    "Tokenizer"
+    "Tokenizer",
+    "TokenizerCfg"
 ]

@@ -6,7 +6,7 @@ from enum import StrEnum
 import torch
 import torch.nn as nn
 
-from proteindiff.model import Base
+from proteindiff.model.base import Base
 
 
 class ActivationFn(StrEnum):
@@ -17,8 +17,8 @@ class ActivationFn(StrEnum):
 
 @dataclass
 class MLPCfg:
-	d_in: int = 512
-	d_out: int = 512
+	d_in: int = 256
+	d_out: int = 256
 	d_hidden: int = 1024
 	hidden_layers: int = 0
 	dropout: float = 0.0
@@ -75,7 +75,7 @@ class MLP(Base):
 
 @dataclass
 class MPNNMLPCfg:
-	d_model: int = 512
+	d_model: int = 256
 	hidden_layers: int = 2
 	dropout: float = 0.0
 	act: ActivationFn = ActivationFn.GELU
@@ -96,7 +96,7 @@ class MPNNMLP(MLP):
 	
 @dataclass
 class FFNCfg:
-	d_model: int = 512
+	d_model: int = 256
 	expansion_factor: int = 4
 	dropout: float = 0.0
 	act: ActivationFn = ActivationFn.GELU
@@ -114,7 +114,23 @@ class FFN(MLP):
 			zeros=cfg.zeros,
 		)
 		super().__init__(mlp_cfg)
+		
+@dataclass
+class ProjectionHeadCfg:
+    d_in: int = 256
+    d_out: int = 256
 
+class ProjectionHead(MLP):
+    def __init__(self, cfg: ProjectionHeadCfg):
+        mlp_cfg = MLPCfg(
+            d_in = cfg.d_in,
+            d_out = cfg.d_out,
+            d_hidden = max(cfg.d_in, cfg.d_out),
+            hidden_layers=0,
+            dropout = 0.0,
+            act = ActivationFn.GELU,
+        )
+        super().__init__(mlp_cfg)
 
 # initializations for linear layers
 def init_orthogonal(m):
