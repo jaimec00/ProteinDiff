@@ -1,8 +1,9 @@
 '''
 hold constants that are reused throughout the model here
 '''
-from .amber.parse_amber_lib import parse_amber_lib
+from proteindiff.static.amber.parse_amber_lib import parse_amber_lib
 import numpy as np
+from enum import StrEnum
 
 # dict to convert amino acid three letter codes to one letter
 three_2_one = {
@@ -115,3 +116,7 @@ for aa, atom_pcs in raw_charges.items():
 
 # X is treated as glycine
 amber_partial_charges[aa_2_lbl("X"), :] = amber_partial_charges[aa_2_lbl("G"), :]
+
+class TrainingStage(StrEnum):
+	VAE = "vae"
+	DIFFUSION = "diffusion"
