@@ -20,7 +20,7 @@ from proteindiff.model import ProteinDiff
 from proteindiff.model.ProteinDiff import ProteinDiffCfg
 from proteindiff.training.logger import Logger, LoggerCfg
 from proteindiff.training.data.data_loader import DataHolder, DataHolderCfg
-from proteindiff.training.losses import TrainingRunLosses, TrainingRunLossesCfg
+from proteindiff.training.losses.training_loss import TrainingRunLosses, TrainingRunLossesCfg
 from proteindiff.training.optim import OptimCfg
 from proteindiff.training.scheduler import SchedulerCfg
 from proteindiff.static.constants import TrainingStage
@@ -75,8 +75,7 @@ class TrainingRun:
 	def setup_model(self):
 		
 		self.log("loading model...")
-		with self.gpu:
-			self.model = ProteinDiff(self.cfg.model)
+		self.model = ProteinDiff(self.cfg.model).to(self.gpu)
 
 	def setup_optim(self):
 		self.log("loading optimizer...")
@@ -117,8 +116,10 @@ class TrainingRun:
 			raise ValueError(f"invalid lr_type: {self.cfg.scheduler.lr_type}. options are ['attn', 'static']")
 
 	def model_checkpoint(self, epoch_idx):
-		if (epoch_idx+1) % self.logger.model_checkpoints == 0: # model checkpointing
-			self.output.save_checkpoint(appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
+		pass
+		# TODO: fix this
+		# if (epoch_idx+1) % self.logger.model_checkpoints == 0: # model checkpointing
+		# 	self.logger.save_checkpoint(appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
 
 	def save_checkpoint(self, appended_str=""):
 		# TODO: implement checkpointing
@@ -129,27 +130,28 @@ class TrainingRun:
 
 	def training_converged(self, epoch_idx):
 		# TODO check this out
+		return False
 
-		criteria = self.losses.val.losses[list(self.losses.val.losses.keys())[0]]
+		# criteria = self.losses.val.losses[list(self.losses.val.losses.keys())[0]]
 
-		choose_best = min # choose best
-		best = float("inf")
-		converged = lambda best, thresh: best > thresh
+		# choose_best = min # choose best
+		# best = float("inf")
+		# converged = lambda best, thresh: best > thresh
 
-		# val losses are already in avg seq sim format per epoch
-		if self.training_parameters.early_stopping.tolerance+1 > len(criteria):
-			return False
+		# # val losses are already in avg seq sim format per epoch
+		# if self.training_parameters.early_stopping.tolerance+1 > len(criteria):
+		# 	return False
 
-		current_n = criteria[-(self.training_parameters.early_stopping.tolerance):]
-		old = criteria[-(self.training_parameters.early_stopping.tolerance+1)]
+		# current_n = criteria[-(self.training_parameters.early_stopping.tolerance):]
+		# old = criteria[-(self.training_parameters.early_stopping.tolerance+1)]
 
-		for current in current_n:
-			delta = current - old
-			best = choose_best(best, delta) 
+		# for current in current_n:
+		# 	delta = current - old
+		# 	best = choose_best(best, delta) 
 
-		has_converged = converged(best, self.training_parameters.early_stopping.thresh)
+		# has_converged = converged(best, self.training_parameters.early_stopping.thresh)
 
-		return has_converged
+		# return has_converged
 
 	def train(self):
 		'''
@@ -176,40 +178,33 @@ class TrainingRun:
 			# clear temp losses
 			self.losses.clear_tmp_losses()
 
-			# init epoch pbar # TODO check the total arg is right
-			epoch_pbar = tqdm(total=len(self.data.train), desc="training progress", unit="step")
+			epoch_pbar = tqdm(total=len(self.data.train), desc="training progress", unit="samples")
 
 			# loop through batches
 			for b_idx, data_batch in enumerate(self.data.train):
 
 				# learn
-				self.batch_learn(data_batch)
+				self.batch_learn(data_batch, b_idx)
 
 				# update pbar
-				epoch_pbar.update(1)
+				if b_idx % 10 ==0:
+					epoch_pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
+				epoch_pbar.update(data_batch.samples)
 			
 			# log epoch losses and save avg 
 			epoch_losses = self.losses.tmp.get_avg()
-			self.logger.log_losses(epoch_losses)
-			losses.train.add_losses(losses_dict)
+			self.logger.log_losses(epoch_losses, mode="train")
+			self.losses.train.add_losses(epoch_losses)
 
 			# run validation
 			self.validation()
 			
-			# checkpoint
-			self.model_checkpoint(epoch_idx)
-
-			# early stopping
-			if self.training_converged(epoch_idx): break
-			
 		# announce trainnig is done
-		self.log(f"training finished after {epoch.epoch} epochs", fancy=True)
+		self.log(f"training finished after {epoch_idx} epochs", fancy=True)
 
 		# plot training losses
-		self.output.plot_training(self.losses)
+		self.logger.plot_training(self.losses)
 
-		# save the model
-		self.output.save_checkpoint(self.model, self.optim, self.scheduler, appended_str="final")
 
 	@torch.no_grad()
 	def validation(self):
@@ -220,21 +215,23 @@ class TrainingRun:
 		# clear losses for this run
 		self.losses.clear_tmp_losses()
 
-		# progress bar # TODO: check len is right here
-		val_pbar = tqdm(total=len(self.data.val), desc="validation progress", unit="step")
+		# progress bar
+		val_pbar = tqdm(total=len(self.data.val), desc="validation progress", unit="samples")
 
 		# loop through validation batches
-		for data_batch in self.data.val:
+		for b_idx, data_batch in enumerate(self.data.val):
 				
 			# run the model
 			self.batch_forward(data_batch)
 
-			val_pbar.update(1)
+			if b_idx % 10 == 0:
+				val_pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
+			val_pbar.update(data_batch.samples)
 
 		# log the losses
 		val_losses = self.losses.tmp.get_avg()
-		self.output.log_losses(test_losses)
-		self.losses.add_losses(val_losses)
+		self.logger.log_losses(val_losses, mode="val")
+		self.losses.val.add_losses(val_losses)
 
 	@torch.no_grad()
 	def test(self):
@@ -245,25 +242,24 @@ class TrainingRun:
 		# log
 		self.log("starting testing", fancy=True)
 		
-		# init losses
-		self.losses.set_inference_losses(self.training_parameters.train_type)
-
 		# progress bar
-		test_pbar = tqdm(total=len(self.data.test), desc="test progress", unit="step")
+		test_pbar = tqdm(total=len(self.data.test), desc="test progress", unit="samples")
 
 		# loop through testing batches
-		for data_batch in self.data.test:
+		for b_idx, data_batch in enumerate(self.data.test):
 				
 			# run the model
 			self.batch_forward(data_batch)
 
 			# update pbar
-			test_pbar.update(1)
+			if b_idx % 10 == 0:
+				test_pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
+			test_pbar.update(data_batch.samples)
 		
 		# log the losses
 		test_losses = self.losses.tmp.get_avg()
-		self.output.log_losses(test_losses)
-		self.losses.extend_losses(test_losses)
+		self.logger.log_losses(test_losses, mode="test")
+		self.losses.test.extend_losses(self.losses.tmp)
 
 	def log(self, message, fancy=False):
 		if fancy:
@@ -288,10 +284,10 @@ class TrainingRun:
 		'''
 		
 		# move batch to gpu
-		data_batch.move_to(self.model.device)
+		data_batch.move_to(self.gpu)
 
 		# for vae training
-		if self.cfg.train_type==TrainingStage.VAE:
+		if self.cfg.train_stage==TrainingStage.VAE:
 			
 			coords_bb, divergence, local_frames = self.model.tokenizer(data_batch.coords, data_batch.labels, data_batch.atom_mask)
 			
@@ -304,7 +300,7 @@ class TrainingRun:
 				anglogram, 
 				t, x, y, sin, cos,
 				plddt, pae, 
-			) = model.vae(
+			) = self.model.vae_fwd(
 				divergence=divergence,
 				coords_bb=coords_bb,
 				frames=local_frames,
@@ -317,12 +313,12 @@ class TrainingRun:
 				
 			# compute loss
 			losses = self.losses.loss_fn.vae(
-				latent_mu, 
-				latent_logvar, 
+				mu, logvar, 
 				divergence_pred, 
 				divergence, 
 				seq_pred, data_batch.labels,
-				data_batch.coords, coords_bb, frames,
+				distogram, anglogram,
+				data_batch.coords, coords_bb, local_frames,
 				t, x, y, 
 				sin, cos,
 				plddt, pae,
@@ -335,7 +331,7 @@ class TrainingRun:
 			pass
 
 		# add the losses to the temporary losses
-		self.losses.tmp.add_losses(losses, valid_toks=self.loss_mask.sum())
+		self.losses.tmp.add_losses(losses, valid_toks=len(data_batch))
 
 	def batch_backward(self, data_batch, b_idx):
 
@@ -346,8 +342,8 @@ class TrainingRun:
 		if learn_step:
 		
 			# grad clip
-			if self.grad_clip_norm:
-				torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
+			if self.cfg.grad_clip_norm:
+				torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.cfg.grad_clip_norm)
 
 			# step
 			self.optim.step()

@@ -59,7 +59,7 @@ class Logger():
 		''')
 		)
 
-	def log_losses(self, losses_dict):
+	def log_losses(self, losses_dict, mode="train"):
 
 		for loss_type, loss in losses_dict.items():
 			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	

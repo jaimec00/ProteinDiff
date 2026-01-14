@@ -137,7 +137,7 @@ class BatchBuilder:
 		return len(self._buffer)>=self._buffer_size
 
 	def _batch_full(self) -> bool:
-		return self._cur_tokens+(len(self._buffer[-1]) if self._buffer else 0)>=self._batch_tokens
+		return self._cur_tokens+(len(self._buffer[-1]) if self._buffer else 0)>=self._batch_tokens and self._cur_tokens > 0
 
 
 class DataBatch:
@@ -147,8 +147,8 @@ class DataBatch:
 		coords = []
 		labels = []
 
-		seq_pos = []
-		chain_pos = []
+		seq_idx = []
+		chain_idx = []
 		sample_idx = []
 
 		atom_mask = []
@@ -162,8 +162,8 @@ class DataBatch:
 			coords.append(asmb.coords)
 			labels.append(asmb.labels)
 
-			seq_pos.append(asmb.seq_pos)
-			chain_pos.append(asmb.chain_pos)
+			seq_idx.append(asmb.seq_idx)
+			chain_idx.append(asmb.chain_idx)
 			sample_idx.append(torch.full(asmb.labels.shape, idx))
 
 			atom_mask.append(asmb.atom_mask)
@@ -174,8 +174,8 @@ class DataBatch:
 		self.coords = torch.cat(coords, dim=0) # ZN x 14 x 3
 		self.labels = torch.cat(labels, dim=0) # ZN
 
-		self.seq_pos = torch.cat(seq_pos, dim=0)# ZN
-		self.chain_pos = torch.cat(chain_pos, dim=0)# ZN
+		self.seq_idx = torch.cat(seq_idx, dim=0)# ZN
+		self.chain_idx = torch.cat(chain_idx, dim=0)# ZN
 		self.sample_idx = torch.cat(sample_idx, dim=0) # ZN
 		
 		self.atom_mask = torch.cat(atom_mask, dim=0)# ZN x 14
@@ -193,15 +193,15 @@ class DataBatch:
 	@torch.no_grad
 	def set_cu_seqlens(self):
 		_, self.seqlens = torch.unique_consecutive(self.sample_idx, return_counts=True)
-		self.cu_seqlens = torch.nn.functional.pad(seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
-		self.max_seqlen = seqlens.max(dim=0).values.item()
+		self.cu_seqlens = torch.nn.functional.pad(self.seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
+		self.max_seqlen = self.seqlens.max(dim=0).values.item()
 
 	@torch.no_grad()
 	def apply_mask(self, mask: torch.Tensor) -> None:
 		self.coords = self.coords[mask, :, :]
 		self.labels = self.labels[mask]
-		self.seq_pos = self.seq_pos[mask]
-		self.chain_pos = self.chain_pos[mask]
+		self.seq_idx = self.seq_idx[mask]
+		self.chain_idx = self.chain_idx[mask]
 		self.sample_idx = self.sample_idx[mask]
 		self.atom_mask = self.atom_mask[mask, :]
 		self.trgt_mask = self.trgt_mask[mask]
@@ -214,8 +214,8 @@ class DataBatch:
 	def move_to(self, device: torch.device):
 		self.coords = self.coords.to(device)
 		self.labels = self.labels.to(device)
-		self.seq_pos = self.seq_pos.to(device)
-		self.chain_pos = self.chain_pos.to(device)
+		self.seq_idx = self.seq_idx.to(device)
+		self.chain_idx = self.chain_idx.to(device)
 		self.sample_idx = self.sample_idx.to(device)
 		self.atom_mask = self.atom_mask.to(device)
 		self.trgt_mask = self.trgt_mask.to(device)
@@ -224,7 +224,10 @@ class DataBatch:
 		self.caa_mask = self.caa_mask.to(device)		
 		self.seqlens = self.seqlens.to(device)
 		self.cu_seqlens = self.cu_seqlens.to(device)
-		self.max_seqlen = self.max_seqlen.to(device)
+
+	@property
+	def samples(self):
+		return self.cu_seqlens.size(0)-1
 
 	def __len__(self):
 		return self.labels.size(0)
@@ -295,6 +298,8 @@ class PDBData:
 
 			# get the data for this chain
 			asmb_chain_data = self._get_chain(asmb_chain)
+			if asmb_chain_data is None:
+				continue
 			
 			# extract tensors			
 			labels.append(asmb_chain_data["seq"]) # vectorizes the conversion from str -> labels
@@ -334,6 +339,9 @@ class PDBData:
 
 		# load the chain data
 		chain_path = self._base_path / Path(self._pdb + f"_{chain}.pt")
+		if not chain_path.exists():
+			self._chain_cache[chain] = None
+			return
 		chain_data = torch.load(chain_path, weights_only=True, map_location="cpu")
 
 		# remove unnecessary keys
@@ -377,18 +385,18 @@ class Assembly:
 	@torch.no_grad()
 	def construct(self) -> None:
 
-		self.coords = torch.from_numpy(self.coords) 
-		self.labels = torch.from_numpy(self.labels) 
-		self.atom_mask = torch.from_numpy(self.atom_mask) 
-		self.asmb_xform = torch.from_numpy(self.asmb_xform) 
+		self.coords = torch.from_numpy(self.coords).float()
+		self.labels = torch.from_numpy(self.labels)
+		self.atom_mask = torch.from_numpy(self.atom_mask)
+		self.asmb_xform = torch.from_numpy(self.asmb_xform).float() 
 
 		# compute seq idxs and chain idxs, note that need to crop in case labels was cropped earlier
-		self.seq_pos = torch.cat([torch.arange(size) for _, size in self._chain_info], dim=0)[:self.labels.size(0)]
-		self.chain_pos = torch.cat([torch.full((size,), idx) for idx, size in self._chain_info], dim=0)[:self.labels.size(0)]
+		self.seq_idx = torch.cat([torch.arange(size) for _, size in self._chain_info], dim=0)[:self.labels.size(0)]
+		self.chain_idx = torch.cat([torch.full((size,), idx) for idx, size in self._chain_info], dim=0)[:self.labels.size(0)]
 
 		# make the mask for trgt chain and for homomers
-		self.trgt_mask = self.chain_pos == self._trgt_chain
-		self.homo_mask = torch.isin(self.chain_pos, torch.from_numpy(self._homo_chains) if isinstance(self._homo_chains, np.ndarray) else self._homo_chains)
+		self.trgt_mask = self.chain_idx == self._trgt_chain
+		self.homo_mask = torch.isin(self.chain_idx, torch.from_numpy(self._homo_chains) if isinstance(self._homo_chains, np.ndarray) else self._homo_chains)
 
 		# perform the xform
 		self._xform()
@@ -408,8 +416,8 @@ class Assembly:
 		# adjust sizes based on the number of copies made
 		self.coords = (torch.einsum("bij,raj->brai", R, self.coords) + T.view(num_copies, 1,1,3)).reshape(N*num_copies, A, S)
 		self.labels = self.labels.repeat(num_copies)
-		self.seq_pos = self.seq_pos.repeat(num_copies)
-		self.chain_pos = self.chain_pos.repeat(num_copies)
+		self.seq_idx = self.seq_idx.repeat(num_copies)
+		self.chain_idx = self.chain_idx.repeat(num_copies)
 		self.atom_mask = self.atom_mask.repeat([num_copies, 1])
 		self.trgt_mask = self.trgt_mask.repeat(num_copies)
 		self.homo_mask = self.homo_mask.repeat(num_copies)

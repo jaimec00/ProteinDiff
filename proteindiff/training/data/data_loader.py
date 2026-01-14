@@ -78,7 +78,7 @@ class DataHolder:
 				epoch=self._epoch
 			))
 
-			loader = DataLoader(data, batch_size=None, num_workers=config.num_workers, collate_fn=lambda x: x[0],
+			loader = DataLoader(data, batch_size=None, num_workers=config.num_workers, collate_fn=lambda x: x,
 								prefetch_factor=config.prefetch_factor if config.num_workers else None, persistent_workers=config.num_workers>0
 								)
 
@@ -98,9 +98,9 @@ class DataHolder:
 
 		# get the val and test clusters
 		with open(data_path / Path("valid_clusters.txt"), "r") as v:
-			val_clusters = [i for i in v.read().split("\n") if i]
+			val_clusters = [int(i) for i in v.read().split("\n") if i]
 		with open(data_path / Path("test_clusters.txt"), "r") as t:
-			test_clusters = [i for i in t.read().split("\n") if i]
+			test_clusters = [int(i) for i in t.read().split("\n") if i]
 
 		# split the csv accordingly
 		train_info = clusters.loc[~clusters.CLUSTER.isin(val_clusters+test_clusters), :]

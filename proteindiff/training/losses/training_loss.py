@@ -87,7 +87,7 @@ class LossHolder:
 
 	def get_avg(self) -> None:
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
-		losses = {loss_type: sum(loss.item() if isinstance(loss, torch.Tensor) else loss for loss in loss_list) / (self.valid_toks.item() if isinstance(self.valid_toks, torch.Tensor) else self.valid_toks) for loss_type, loss_list in self.losses.items()}
+		losses = {loss_type: sum(loss.item() if isinstance(loss, torch.Tensor) else loss for loss in loss_list) / max(1,self.valid_toks.item() if isinstance(self.valid_toks, torch.Tensor) else self.valid_toks) for loss_type, loss_list in self.losses.items()}
 		return losses
 
 	def add_losses(self, losses: Dict[str, List[torch.Tensor | float]], valid_toks: int=1) -> None:
@@ -146,18 +146,14 @@ class LossFn:
 
 	def vae(
 		self, 
-		latent_mean: torch.Tensor, 
-		latent_logvar: torch.Tensor, 
-		
-		voxels_pred: torch.Tensor, 
-		voxels_true: torch.Tensor, 
-		
-		seq_pred: torch.Tensor, 
-		seq_true: torch.Tensor, 
-		
+		latent_mean, 
+		latent_logvar, 
+		voxels_pred, 
+		voxels_true, 
+		seq_pred, 
+		seq_true, 
 		distogram_pred,
 		anglogram_pred,
-
 		coords_true, coords_bb_true, frames_true,
 		t, x, y,
 		sin, cos,
@@ -176,7 +172,8 @@ class LossFn:
 		seq_cel, matches, probs = self.seq_loss(seq_pred, seq_true)
 
 		# distogram and anglogram loss
-		distogram_cel, anglogram_cel = self.coarse_struct_loss(distogram_pred, anglogram_pred, coords_bb, sample_idx)
+		distogram_cel, anglogram_cel = distogram_pred.sum()*0, anglogram_pred.sum()*0
+		# self.coarse_struct_loss(distogram_pred, anglogram_pred, coords_bb_true, sample_idx)
 
 		# full struct loss
 		dist_loss, angle_loss, plddt_loss, pae_loss = self.fine_struct_loss(
@@ -223,6 +220,7 @@ class LossFn:
 		return losses
 
 	def fine_struct_loss(
+		self,
 		coords_true, 
 		coords_bb_true, 
 		frames_true, 
@@ -237,7 +235,7 @@ class LossFn:
 	):
 	
 		# TODO: implement this
-		return dist_loss.sum()*0, angle_loss.sum()*0, plddt_loss.sum()*0, pae_loss.sum()*0
+		return t.sum()*0, x.sum()*0, y.sum()*0, sin.sum()*0
 
 
 	def diffusion(self, pred: torch.Tensor, trgt: torch.Tensor) -> torch.Tensor:
@@ -264,7 +262,7 @@ class LossFn:
 		'''greedy selection'''
 		return (torch.argmax(seq_pred, dim=-1) == seq_true).sum() # 1, 
 
-	def compute_probs(self, seq_pred: torch.Tensor, seq_true: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+	def compute_probs(self, seq_pred: torch.Tensor, seq_true: torch.Tensor) -> torch.Tensor:
 		probs = torch.softmax(seq_pred, dim=-1)
 		probs_sum = (torch.gather(probs, -1, seq_true.unsqueeze(-1))).sum()
 		return probs_sum
@@ -295,14 +293,14 @@ class LossFn:
 
 	def distogram_cel(self, distogram, Cb):
 		dist_bins = distogram.size(-1)
-		distogram_true = self.get_dist_lbl(Cb, dist_bins, mask)
-		dist_loss = self.struct_reduce_cel(distogram, distogram_true, mask, mode="distogram")
+		distogram_true = self.get_dist_lbl(Cb, dist_bins)
+		dist_loss = self.struct_reduce_cel(distogram, distogram_true, mode="distogram")
 		return dist_loss
 
 	def anglogram_cel(self, anglogram, CaCb):
 		angle_bins = anglogram.size(-1)
-		anglogram_true = self.get_angle_lbl(CaCb, angle_bins, mask)
-		angle_loss = self.struct_reduce_cel(anglogram, anglogram_true, mask, mode="anglogram")
+		anglogram_true = self.get_angle_lbl(CaCb, angle_bins)
+		angle_loss = self.struct_reduce_cel(anglogram, anglogram_true, mode="anglogram")
 		return angle_loss
 
 	def get_dist_lbl(self, Cb: torch.Tensor, bins: int) -> torch.Tensor:
@@ -313,7 +311,7 @@ class LossFn:
 		# compute true distances
 		true_dists = torch.linalg.vector_norm(Cb.unsqueeze(1) - Cb.unsqueeze(0), dim=-1) # ZN, ZN
 
-		return self.get_lbl(true_dists, dist_bins, mask)
+		return self.get_lbl(true_dists, dist_bins)
 
 	def get_angle_lbl(self, CaCb: torch.Tensor, bins: int) -> torch.Tensor:
 
@@ -323,7 +321,7 @@ class LossFn:
 		# compute true distances
 		true_angles = torch.linalg.vecdot(CaCb.unsqueeze(1), CaCb.unsqueeze(0), dim=-1) # ZN, ZN
 
-		return self.get_lbl(true_angles, angle_bins, mask)
+		return self.get_lbl(true_angles, angle_bins)
 
 	def get_lbl(self, true, bins):
 
