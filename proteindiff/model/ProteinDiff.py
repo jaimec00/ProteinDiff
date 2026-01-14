@@ -76,7 +76,7 @@ class ProteinDiff(Base):
 			case TrainingStage.DIFFUSION:
 				pass
 		
-	def vae(
+	def vae_fwd(
 		self,
 		divergence: Int[T, "ZN 1 Vx Vy Vz"],
 		coords_bb: Float[T, "ZN 14 3"],
@@ -118,7 +118,7 @@ class ProteinDiff(Base):
 			plddt, pae, 
 		)
 
-	def diffusion_forward(self):
+	def diffusion_fwd(self):
 		pass
 
 	def generate(self):

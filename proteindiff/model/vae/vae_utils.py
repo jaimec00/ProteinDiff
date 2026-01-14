@@ -5,7 +5,12 @@ import torch.nn as nn
 from dataclasses import dataclass, field
 from einops import rearrange
 import math
-
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module="torch.nn.modules.conv"
+)
 from proteindiff.model.model_utils.mlp import MLP, MLPCfg, ProjectionHead, ProjectionHeadCfg
 from proteindiff.model.base import Base
 from proteindiff.static.constants import canonical_aas
@@ -175,7 +180,7 @@ class DownsampleModel(Base):
         self.down_blocks = nn.Sequential(*blocks)
 
     def forward(self, x: Float[T, "ZN C Vx Vy Vz"]) -> Float[T, "ZN d_model"]:
-        return rearrange(self.blocks(x), "ZN C one one one -> ZN (C one one one)")
+        return self.down_blocks(x).reshape(x.size(0), -1)
 
 @dataclass
 class UpsampleModelCfg:
@@ -213,7 +218,7 @@ class UpsampleModel(Base):
         self.up_blocks = nn.Sequential(*blocks)
 
     def forward(self, x: Float[T, "ZN C"]) -> Float[T, "ZN C Vx Vy Vz"]:
-        x = self.blocks(rearrange(x, "ZN C -> ZN C one one one", one=1))
+        x = self.up_blocks(x.reshape(*x.shape, 1, 1, 1))
         return x
 
 
@@ -228,7 +233,7 @@ class LatentProjectionHead(ProjectionHead):
         super().__init__(projection_cfg)
 
     def forward(self, x: Float[T, "ZN d_model"]) -> Tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
-        mu_logvar = super()(x)
+        mu_logvar = super().forward(x)
         mu, logvar = torch.chunk(mu_logvar, chunks=2, dim=-1)
         latent = mu + torch.randn_like(mu)*torch.exp(-0.5*logvar)
         
@@ -255,7 +260,7 @@ class PairwiseProjectionHeadCfg:
 class PairwiseProjectionHead(Base):
     def __init__(self, cfg: PairwiseProjectionHeadCfg):
         super().__init__()
-        self.Wqk = nn.Linear(cfg.d_model, 2*cfg.d_down)
+        self.Wqk = nn.Linear(cfg.d_model, cfg.d_down)
         projection_cfg = ProjectionHeadCfg(d_in=cfg.d_down, d_out=cfg.num_bins)
         self.proj = ProjectionHead(projection_cfg)
 
@@ -286,7 +291,7 @@ class StructProjectionHead(Base):
         self.plddt_proj = PairwiseProjectionHead(cfg.plddt_proj)
         self.pae_proj = PairwiseProjectionHead(cfg.pae_proj)
 
-    def forward(self, x: Float[T, "ZN d_model"]
+    def forward(self, struct_logits: Float[T, "ZN d_model"]
     ) -> Tuple[
         Float[T, "ZN ZNN d_dist"], 
         Float[T, "ZN ZNN d_angle"],
@@ -298,16 +303,16 @@ class StructProjectionHead(Base):
         Float[T, "ZN ZNN d_plddt"],
         Float[T, "ZN ZNN d_pae"],
     ]:
-        distogram = self.dist_proj(x)
-        anglogram = self.angle_proj(x)
+        distogram = self.dist_proj(struct_logits)
+        anglogram = self.angle_proj(struct_logits)
 
-        txy = self.frame_proj(x)
+        txy = self.frame_proj(struct_logits)
         t, x, y = torch.chunk(txy, chunks=3, dim=-1)
         
-        sincos = self.torsion_proj(x)
+        sincos = self.torsion_proj(struct_logits)
         sin, cos = torch.chunk(sincos, chunks=2, dim=-1)
         
-        plddt = self.plddt_proj(x)
-        pae = self.pae_proj(x)
+        plddt = self.plddt_proj(struct_logits)
+        pae = self.pae_proj(struct_logits)
 
         return distogram, anglogram, t, x, y, sin, cos, plddt, pae
