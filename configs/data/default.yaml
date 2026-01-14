@@ -1,12 +1,12 @@
 _target_: proteindiff.training.data.data_loader.DataHolderCfg
 
-data_path: /home/jaime/Desktop/scratch/data/pdb_2021aug02_sample
-num_train: -1
-num_val: -1
-num_test: -1
+data_path: /home/ubuntu/proteinDiffVirgina/data/pdb_2021aug02
+num_train: 512
+num_val: 512
+num_test: 512
 batch_tokens: 512
-min_seq_size: 64
-max_seq_size: 512
+min_seq_size: 16
+max_seq_size: 64
 max_resolution: 3.5
 homo_thresh: 0.7
 asymmetric_units_only: false

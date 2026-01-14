@@ -25,7 +25,6 @@ hydra-core = "*"
 pytest = "*"
 
 [pypi-dependencies]
-ninja = "*"
 jaxtyping = "*"
 proteindiff = { path = ".", editable = true }
 
