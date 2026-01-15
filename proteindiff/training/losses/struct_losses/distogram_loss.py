@@ -5,32 +5,39 @@ import torch
 from proteindiff.types import Float, Int, T
 
 
+@triton.autotune(configs=[
+        triton.Config(kwargs={}, num_warps=w)
+        for w in [4, 8, 16]
+    ],
+    key=["BLOCK_D"]
+
+)
 @triton.jit
 def distogram_loss_fwd_bwd(
     # inputs
-    coords_ptr, logits_ptr, cu_seqlens_ptr, fc1_ptr, fc2_ptr,
+    logits_ptr, fc1_ptr, fc2_ptr, coords_ptr, cu_seqlens_ptr,
     # outputs
-    loss_ptr, per_token_loss_ptr, d_coords_ptr, d_logits_ptr, d_fc1_ptr, d_fc2_ptr,
+    per_token_loss_ptr, d_logits_ptr, d_fc1_ptr, d_fc2_ptr, d_coords_ptr,
     # shapes
     ZN, Z, d_in, d_hidden, d_out,
     # distance bin params
     min_dist, max_dist,
-    # strides - coords (ZN, 3)
-    stride_coords_zn, stride_coords_3,
     # strides - logits (ZN, 2, d_in)
     stride_logits_zn, stride_logits_2, stride_logits_d,
     # strides - fc1 (d_hidden, 2*d_in)
     stride_fc1_hidden, stride_fc1_in,
     # strides - fc2 (d_out, d_hidden)
     stride_fc2_out, stride_fc2_hidden,
-    # strides - d_coords (ZN, 3)
-    stride_dcoords_zn, stride_dcoords_3,
+    # strides - coords (ZN, 3)
+    stride_coords_zn, stride_coords_3,
     # strides - d_logits (ZN, 2, d_in)
     stride_dlogits_zn, stride_dlogits_2, stride_dlogits_d,
     # strides - d_fc1 (d_hidden, 2*d_in)
     stride_dfc1_hidden, stride_dfc1_in,
     # strides - d_fc2 (d_out, d_hidden)
     stride_dfc2_out, stride_dfc2_hidden,
+    # strides - d_coords (ZN, 3)
+    stride_dcoords_zn, stride_dcoords_3,
     # block sizes
     BLOCK_D: tl.constexpr,
 ):
@@ -53,38 +60,38 @@ def distogram_loss_fwd_bwd(
 
     bin_width = (max_dist - min_dist) / d_out
 
-    # compute n_pairs ahead of time for normalization
+    # compute n_pairs ahead of time for normalization (includes self i==j)
     seq_len = seq_end - seq_start
-    inv_n_pairs = 1.0 / tl.maximum(seq_len - 1.0, 1.0)
+    inv_n_pairs = 1.0 / tl.maximum(seq_len, 1.0)
 
     # offsets
     offs = tl.arange(0, BLOCK_D)
     offs_h = tl.arange(0, BLOCK_D)  # for hidden dim
     offs_o = tl.arange(0, BLOCK_D)  # for output dim
 
-    # load fc1 (d_hidden, 2*d_in) - first and second halves
+    # load fc1 (d_hidden, 2*d_in) - first and second halves (keep in fp16 for tensor core)
     fc1_mask = (offs_h[:, None] < d_hidden) & (offs[None, :] < d_in)
     fc1_first = tl.load(
         fc1_ptr + offs_h[:, None] * stride_fc1_hidden + offs[None, :] * stride_fc1_in,
         mask=fc1_mask, other=0.0
-    ).to(tl.float32)
+    )
     fc1_second = tl.load(
         fc1_ptr + offs_h[:, None] * stride_fc1_hidden + (d_in + offs[None, :]) * stride_fc1_in,
         mask=fc1_mask, other=0.0
-    ).to(tl.float32)
+    )
 
-    # load fc2 (d_out, d_hidden)
+    # load fc2 (d_out, d_hidden) (keep in fp16 for tensor core)
     fc2_mask = (offs_o[:, None] < d_out) & (offs_h[None, :] < d_hidden)
     fc2 = tl.load(
         fc2_ptr + offs_o[:, None] * stride_fc2_out + offs_h[None, :] * stride_fc2_hidden,
         mask=fc2_mask, other=0.0
-    ).to(tl.float32)
+    )
 
-    # load q[i], k[i]
+    # load q[i], k[i] (keep in fp16 for tensor core)
     qi_ptr = logits_ptr + pid * stride_logits_zn + 0 * stride_logits_2 + offs * stride_logits_d
     ki_ptr = logits_ptr + pid * stride_logits_zn + 1 * stride_logits_2 + offs * stride_logits_d
-    qi = tl.load(qi_ptr, mask=offs < d_in, other=0.0).to(tl.float32)
-    ki = tl.load(ki_ptr, mask=offs < d_in, other=0.0).to(tl.float32)
+    qi = tl.load(qi_ptr, mask=offs < d_in, other=0.0)
+    ki = tl.load(ki_ptr, mask=offs < d_in, other=0.0)
 
     # load coords[i]
     xi = tl.load(coords_ptr + pid * stride_coords_zn + 0)
@@ -99,16 +106,15 @@ def distogram_loss_fwd_bwd(
     d_fc2_acc = tl.zeros([BLOCK_D, BLOCK_D], dtype=tl.float32)
     n_pairs_f = 0.0
 
-    # loop over j in sequence
+    # loop over j in sequence (includes self i==j)
     for j in range(seq_start, seq_end):
-        # skip self
-        valid = (j != pid)
+        valid = True
 
-        # load q[j], k[j]
+        # load q[j], k[j] (keep in fp16 for tensor core)
         qj_ptr = logits_ptr + j * stride_logits_zn + 0 * stride_logits_2 + offs * stride_logits_d
         kj_ptr = logits_ptr + j * stride_logits_zn + 1 * stride_logits_2 + offs * stride_logits_d
-        qj = tl.load(qj_ptr, mask=offs < d_in, other=0.0).to(tl.float32)
-        kj = tl.load(kj_ptr, mask=offs < d_in, other=0.0).to(tl.float32)
+        qj = tl.load(qj_ptr, mask=offs < d_in, other=0.0)
+        kj = tl.load(kj_ptr, mask=offs < d_in, other=0.0)
 
         # load coords[j]
         xj = tl.load(coords_ptr + j * stride_coords_zn + 0)
@@ -123,23 +129,35 @@ def distogram_loss_fwd_bwd(
         bin_idx_f = (dist - min_dist) / bin_width
         bin_idx = tl.minimum(tl.maximum(bin_idx_f, 0.0), d_out - 1.0).to(tl.int32)
 
-        # FFN input: cat(q[i]*k[j], q[i]+k[j])
+        # FFN input: cat(q[i]*k[j], q[i]-k[j])
         qk_mul = qi * kj
-        qk_add = qi + kj
+        qk_sub = qi - kj
 
-        # FFN forward
-        # hidden = relu(fc1_first @ qk_mul + fc1_second @ qk_add)
+        # FFN forward using tl.dot for matrix-vector products
+        # hidden = relu(fc1_first @ qk_mul + fc1_second @ qk_sub)
         d_mask = offs < d_in
         h_mask = offs_h < d_hidden
         o_mask = offs_o < d_out
 
-        hidden_pre = (tl.sum(fc1_first * qk_mul[None, :] * d_mask[None, :], axis=1) +
-                      tl.sum(fc1_second * qk_add[None, :] * d_mask[None, :], axis=1))
-        hidden = tl.maximum(hidden_pre, 0.0) * h_mask  # relu
+        # mask inputs before dot
+        qk_mul_masked = tl.where(d_mask, qk_mul, 0.0)
+        qk_sub_masked = tl.where(d_mask, qk_sub, 0.0)
+
+        # fc1_first @ qk_mul + fc1_second @ qk_sub using tl.dot (fp16)
+        # reshape vectors to 2D: (BLOCK_D,) -> (BLOCK_D, 1), then sum axis=1 to squeeze
+        hidden_pre = (tl.sum(tl.dot(fc1_first, qk_mul_masked[:, None]), axis=1) +
+                      tl.sum(tl.dot(fc1_second, qk_sub_masked[:, None]), axis=1))
+        hidden_pre = tl.where(h_mask, hidden_pre, 0.0)
+        # keep hidden in fp16 for next tl.dot
+        hidden = tl.maximum(hidden_pre, 0.0).to(fc2.dtype)  # relu
         relu_mask = (hidden_pre > 0) & h_mask
 
-        # out_logits = fc2 @ hidden
-        out_logits = tl.sum(fc2 * hidden[None, :] * h_mask[None, :], axis=1) * o_mask
+        # out_logits = fc2 @ hidden using tl.dot (fp16)
+        out_logits = tl.sum(tl.dot(fc2, hidden[:, None]), axis=1)
+        out_logits = tl.where(o_mask, out_logits, 0.0)
+
+        # cast to fp32 for loss computation (softmax, cross entropy)
+        out_logits = out_logits.to(tl.float32)
 
         # log_softmax for numerical stability (avoid underflow in exp)
         out_max = tl.max(tl.where(o_mask, out_logits, -1e9))
@@ -159,25 +177,46 @@ def distogram_loss_fwd_bwd(
         # === backward ===
         # d_out_logits = probs - one_hot(bin_idx)
         d_out_logits = probs - tl.where(offs_o == bin_idx, 1.0, 0.0)
+        d_out_logits_masked = tl.where(o_mask, d_out_logits, 0.0)
 
-        # grad_h = fc2.T @ d_out_logits, d_fc2 += outer(d_out_logits, hidden)
-        grad_h = tl.sum(fc2 * d_out_logits[:, None], axis=0) * h_mask
-        d_fc2_local = d_out_logits[:, None] * hidden[None, :]
+        # grad_h = fc2.T @ d_out_logits using tl.dot with transpose
+        # fc2 is (d_out, d_hidden), fc2.T is (d_hidden, d_out)
+        # cast to fp32 for backward computation
+        fc2_f32 = fc2.to(tl.float32)
+        fc2_t = tl.trans(fc2_f32)
+        grad_h = tl.sum(tl.dot(fc2_t, d_out_logits_masked[:, None]), axis=1)
+        grad_h = tl.where(h_mask, grad_h, 0.0)
+
+        # d_fc2 += outer(d_out_logits, hidden) - hidden needs to be fp32
+        hidden_f32 = hidden.to(tl.float32)
+        d_fc2_local = d_out_logits[:, None] * hidden_f32[None, :]
 
         # relu backward
         grad_h = tl.where(relu_mask, grad_h, 0.0)
 
-        # d_fc1 += outer(grad_h, qk_mul/qk_add)
-        d_fc1_first_local = grad_h[:, None] * qk_mul[None, :]
-        d_fc1_second_local = grad_h[:, None] * qk_add[None, :]
+        # d_fc1 += outer(grad_h, qk_mul/qk_sub) - qk needs to be fp32
+        qk_mul_f32 = qk_mul.to(tl.float32)
+        qk_sub_f32 = qk_sub.to(tl.float32)
+        d_fc1_first_local = grad_h[:, None] * qk_mul_f32[None, :]
+        d_fc1_second_local = grad_h[:, None] * qk_sub_f32[None, :]
 
-        # d_qk_mul = fc1_first.T @ grad_h, d_qk_add = fc1_second.T @ grad_h
-        d_qk_mul = tl.sum(fc1_first * grad_h[:, None], axis=0) * d_mask
-        d_qk_add = tl.sum(fc1_second * grad_h[:, None], axis=0) * d_mask
+        # d_qk_mul = fc1_first.T @ grad_h, d_qk_sub = fc1_second.T @ grad_h using tl.dot
+        grad_h_masked = tl.where(h_mask, grad_h, 0.0)
+        fc1_first_f32 = fc1_first.to(tl.float32)
+        fc1_second_f32 = fc1_second.to(tl.float32)
+        fc1_first_t = tl.trans(fc1_first_f32)
+        fc1_second_t = tl.trans(fc1_second_f32)
+        d_qk_mul = tl.sum(tl.dot(fc1_first_t, grad_h_masked[:, None]), axis=1)
+        d_qk_sub = tl.sum(tl.dot(fc1_second_t, grad_h_masked[:, None]), axis=1)
+        d_qk_mul = tl.where(d_mask, d_qk_mul, 0.0)
+        d_qk_sub = tl.where(d_mask, d_qk_sub, 0.0)
 
-        # d_qi = d_qk_mul * kj + d_qk_add, d_kj = d_qk_mul * qi + d_qk_add
-        d_qi_local = d_qk_mul * kj + d_qk_add
-        d_kj_local = d_qk_mul * qi + d_qk_add
+        # d_qi = d_qk_mul * kj + d_qk_sub, d_kj = d_qk_mul * qi - d_qk_sub
+        # cast q, k to fp32 for gradient computation
+        qi_f32 = qi.to(tl.float32)
+        kj_f32 = kj.to(tl.float32)
+        d_qi_local = d_qk_mul * kj_f32 + d_qk_sub
+        d_kj_local = d_qk_mul * qi_f32 - d_qk_sub
 
         # accumulate (masked by valid)
         loss_acc += tl.where(valid, loss_contrib, 0.0)
@@ -202,8 +241,6 @@ def distogram_loss_fwd_bwd(
 
     # store per-token loss (no atomic needed)
     tl.store(per_token_loss_ptr + pid, loss_acc)
-    # atomic add loss
-    tl.atomic_add(loss_ptr, loss_acc)
 
     # atomic add d_qi to d_logits[i, 0, :]
     d_mask = offs < d_in
@@ -224,15 +261,15 @@ def distogram_loss_fwd_bwd(
 
 
 def distogram_loss(
-    coords: Float[T, "ZN 3"],
     logits: Float[T, "ZN 2 d_in"],
-    cu_seqlens: Int[T, "Z+1"],
     fc1: Float[T, "d_hidden 2*d_in"],
     fc2: Float[T, "d_out d_hidden"],
+    coords: Float[T, "ZN 3"],
+    cu_seqlens: Int[T, "Z+1"],
     min_dist: float = 2.0,
     max_dist: float = 22.0,
 ) -> Float[T, "1"]:
-    return DistogramLoss.apply(coords, logits, cu_seqlens, fc1, fc2, min_dist, max_dist)
+    return DistogramLoss.apply(logits, fc1, fc2, coords, cu_seqlens, min_dist, max_dist)
 
 
 class DistogramLoss(torch.autograd.Function):
@@ -240,11 +277,11 @@ class DistogramLoss(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        coords: Float[T, "ZN 3"],
         logits: Float[T, "ZN 2 d_in"],
-        cu_seqlens: Int[T, "Z+1"],
         fc1: Float[T, "d_hidden 2*d_in"],
         fc2: Float[T, "d_out d_hidden"],
+        coords: Float[T, "ZN 3"],
+        cu_seqlens: Int[T, "Z+1"],
         min_dist: float,
         max_dist: float,
     ) -> Float[T, "1"]:
@@ -268,15 +305,14 @@ class DistogramLoss(torch.autograd.Function):
         fc1_dtype = fc1.dtype
         fc2_dtype = fc2.dtype
 
-        # cast and make contig (use fp32 for accuracy)
+        # coords in fp32 for distance computation, logits/fc1/fc2 in fp16 for tensor core
         coords = coords.to(torch.float32).contiguous()
-        logits = logits.to(torch.float32).contiguous()
+        logits = logits.to(torch.float16).contiguous()
         cu_seqlens = cu_seqlens.to(torch.int32).contiguous()
-        fc1 = fc1.to(torch.float32).contiguous()
-        fc2 = fc2.to(torch.float32).contiguous()
+        fc1 = fc1.to(torch.float16).contiguous()
+        fc2 = fc2.to(torch.float16).contiguous()
 
         # allocate outputs (use fp32 for accuracy)
-        loss = torch.zeros(1, device=coords.device, dtype=torch.float32)
         per_token_loss = torch.zeros(ZN, device=coords.device, dtype=torch.float32)
         d_coords = torch.zeros(ZN, 3, device=coords.device, dtype=torch.float32)
         d_logits = torch.zeros(ZN, 2, d_in, device=coords.device, dtype=torch.float32)
@@ -284,35 +320,36 @@ class DistogramLoss(torch.autograd.Function):
         d_fc2 = torch.zeros(d_out, d_hidden, device=coords.device, dtype=torch.float32)
 
         # block size - use max of all dims, rounded to power of 2
-        BLOCK_D = triton.next_power_of_2(max(d_in, d_hidden, d_out))
+        # tl.dot requires K >= 16, so ensure BLOCK_D >= 16
+        BLOCK_D = max(16, triton.next_power_of_2(max(d_in, d_hidden, d_out)))
         grid = (ZN,)
 
         # launch kernel
         distogram_loss_fwd_bwd[grid](
             # inputs
-            coords, logits, cu_seqlens, fc1, fc2,
+            logits, fc1, fc2, coords, cu_seqlens,
             # outputs
-            loss, per_token_loss, d_coords, d_logits, d_fc1, d_fc2,
+            per_token_loss, d_logits, d_fc1, d_fc2, d_coords,
             # shapes
             ZN, Z, d_in, d_hidden, d_out,
             # distance bin params
             min_dist, max_dist,
-            # strides - coords
-            coords.stride(0), coords.stride(1),
             # strides - logits
             logits.stride(0), logits.stride(1), logits.stride(2),
             # strides - fc1
             fc1.stride(0), fc1.stride(1),
             # strides - fc2
             fc2.stride(0), fc2.stride(1),
-            # strides - d_coords
-            d_coords.stride(0), d_coords.stride(1),
+            # strides - coords
+            coords.stride(0), coords.stride(1),
             # strides - d_logits
             d_logits.stride(0), d_logits.stride(1), d_logits.stride(2),
             # strides - d_fc1
             d_fc1.stride(0), d_fc1.stride(1),
             # strides - d_fc2
             d_fc2.stride(0), d_fc2.stride(1),
+            # strides - d_coords
+            d_coords.stride(0), d_coords.stride(1),
             # block size
             BLOCK_D,
         )
@@ -321,7 +358,7 @@ class DistogramLoss(torch.autograd.Function):
         ctx.save_for_backward(d_coords, d_logits, d_fc1, d_fc2)
         ctx.dtypes = (coords_dtype, logits_dtype, fc1_dtype, fc2_dtype)
 
-        return loss
+        return per_token_loss.sum()
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -335,105 +372,4 @@ class DistogramLoss(torch.autograd.Function):
         d_fc2 = (d_fc2 * grad_output).to(fc2_dtype)
 
         # None for cu_seqlens, min_dist, max_dist
-        return d_coords, d_logits, None, d_fc1, d_fc2, None, None
-
-
-def distogram_loss_ref(coords, logits, cu_seqlens, fc1, fc2, min_dist=2.0, max_dist=22.0, debug=False):
-    """PyTorch reference implementation - matches Triton (sum of per-token means)."""
-    ZN, _, d_in = logits.shape
-    d_out, d_hidden = fc2.shape
-    Z = cu_seqlens.shape[0] - 1
-
-    q = logits[:, 0]  # (ZN, d_in)
-    k = logits[:, 1]  # (ZN, d_in)
-
-    bin_width = (max_dist - min_dist) / d_out
-    total_loss = 0.0
-
-    for s in range(Z):
-        start, end = cu_seqlens[s].item(), cu_seqlens[s + 1].item()
-        for i in range(start, end):
-            loss_i = 0.0
-            n_pairs_i = 0
-            for j in range(start, end):
-                if i == j:
-                    continue
-                # distance
-                dist = torch.sqrt(((coords[i] - coords[j]) ** 2).sum() + 1e-8)
-                bin_idx = torch.clamp((dist - min_dist) / bin_width, 0, d_out - 1).long()
-
-                # FFN input
-                qk_mul = q[i] * k[j]
-                qk_add = q[i] + k[j]
-                ffn_in = torch.cat([qk_mul, qk_add])  # (2*d_in,)
-
-                # FFN forward
-                hidden = torch.relu(fc1 @ ffn_in)  # (d_hidden,)
-                out_logits = fc2 @ hidden  # (d_out,)
-
-                # cross entropy
-                log_probs = torch.log_softmax(out_logits, dim=0)
-                loss_ij = -log_probs[bin_idx]
-                loss_i = loss_i + loss_ij
-                n_pairs_i += 1
-                if debug and i == 0:
-                    print(f"  pair (0,{j}): dist={dist.item():.4f}, bin={bin_idx.item()}, loss={loss_ij.item():.4f}")
-
-            # per-token mean
-            if n_pairs_i > 0:
-                mean_loss_i = loss_i / n_pairs_i
-                total_loss = total_loss + mean_loss_i
-                if debug:
-                    print(f"token {i}: sum={loss_i.item():.4f}, n={n_pairs_i}, mean={mean_loss_i.item():.4f}")
-
-    return total_loss
-
-
-if __name__ == "__main__":
-    torch.manual_seed(42)
-
-    # smaller test for gradient verification - single sequence
-    ZN, d_in, d_hidden, d_out = 4, 16, 16, 16
-    device = torch.device("cuda")
-
-    coords = torch.randn((ZN, 3), device=device, dtype=torch.float32)
-    logits = torch.randn((ZN, 2, d_in), device=device, dtype=torch.float32)
-    fc1 = torch.randn((d_hidden, 2 * d_in), device=device, dtype=torch.float32)
-    fc2 = torch.randn((d_out, d_hidden), device=device, dtype=torch.float32)
-    cu_seqlens = torch.tensor([0, 4], device=device, dtype=torch.int32)
-
-    # reference
-    coords_ref = coords.clone().requires_grad_(True)
-    logits_ref = logits.clone().requires_grad_(True)
-    fc1_ref = fc1.clone().requires_grad_(True)
-    fc2_ref = fc2.clone().requires_grad_(True)
-
-    print("=== Reference ===")
-    loss_ref = distogram_loss_ref(coords_ref, logits_ref, cu_seqlens, fc1_ref, fc2_ref, debug=True)
-    loss_ref.backward()
-
-    # triton
-    coords_tri = coords.clone().requires_grad_(True)
-    logits_tri = logits.clone().requires_grad_(True)
-    fc1_tri = fc1.clone().requires_grad_(True)
-    fc2_tri = fc2.clone().requires_grad_(True)
-
-    loss_tri = distogram_loss(coords_tri, logits_tri, cu_seqlens, fc1_tri, fc2_tri)
-    loss_tri.backward()
-
-    print(f"loss ref: {loss_ref.item():.6f}, triton: {loss_tri.item():.6f}")
-    print(f"loss diff: {abs(loss_ref.item() - loss_tri.item()):.6f}")
-    print(f"loss ratio: {loss_ref.item() / loss_tri.item():.4f}")
-    print()
-
-    # compare grads
-    def compare(name, ref, tri):
-        ref, tri = ref.float(), tri.float()
-        diff = (ref - tri).abs()
-        rel = diff / (ref.abs() + 1e-8)
-        print(f"{name}: max_diff={diff.max().item():.6f}, max_rel={rel.max().item():.6f}, "
-              f"ref_norm={ref.norm().item():.4f}, tri_norm={tri.norm().item():.4f}")
-
-    compare("logits.grad", logits_ref.grad, logits_tri.grad)
-    compare("fc1.grad", fc1_ref.grad, fc1_tri.grad)
-    compare("fc2.grad", fc2_ref.grad, fc2_tri.grad)
+        return d_logits, d_fc1, d_fc2, d_coords, None, None, None
