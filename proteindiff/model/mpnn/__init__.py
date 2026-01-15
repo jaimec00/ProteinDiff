@@ -3,6 +3,7 @@ from .mpnn import (
     MPNNBlock, MPNNBlockCfg,
     EdgeEncoder, EdgeEncoderCfg,
 )
+from .get_neighbors import get_neighbors
 
 __all__ = [
     "MPNNModel", 
@@ -11,4 +12,5 @@ __all__ = [
     "MPNNBlockCfg",
     "EdgeEncoder", 
     "EdgeEncoderCfg",
+    "get_neighbors"
 ]

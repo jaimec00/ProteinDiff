@@ -6,15 +6,26 @@ from dataclasses import dataclass, field
 from einops import rearrange
 import math
 import warnings
-warnings.filterwarnings(
+warnings.filterwarnings( # nn.Conv3d warnings w/ even kernel lengths and "same" padding create copies of the input tensor
     "ignore",
     category=UserWarning,
     module="torch.nn.modules.conv"
 )
+
 from proteindiff.model.model_utils.mlp import MLP, MLPCfg, ProjectionHead, ProjectionHeadCfg
 from proteindiff.model.base import Base
 from proteindiff.static.constants import canonical_aas
-from proteindiff.types import List, Float, Int, T, Tuple
+from proteindiff.types import List, Float, Int, T, Tuple, Callable
+
+from proteindiff.training.losses.struct_losses.distogram_loss import distogram_loss as distogram_loss_fn
+from proteindiff.training.losses.struct_losses.anglogram_loss import anglogram_loss as anglogram_loss_fn
+
+# not implemented yet
+# from proteindiff.utils.struct_utils import coords_from_txy_sincos
+# from proteindiff.training.losses.struct_losses.distance_loss import distance_loss as distance_loss_fn
+# from proteindiff.training.losses.struct_losses.angle_loss import angle_loss as angle_loss_fn
+# from proteindiff.training.losses.struct_losses.plddt_loss import plddt_loss as plddt_loss_fn
+# from proteindiff.training.losses.struct_losses.pae_loss import pae_loss as pae_loss_fn
 
 @dataclass
 class ResNetBlockCfg:
@@ -233,10 +244,9 @@ class LatentProjectionHead(ProjectionHead):
         super().__init__(projection_cfg)
 
     def forward(self, x: Float[T, "ZN d_model"]) -> Tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
-        mu_logvar = super().forward(x)
+        mu_logvar = super().forward(x) # TODO: change this as wont run preforward hooks once implement fsdp (or maybe it will since it inherits ProjectionHead weights and called forward on the child?)
         mu, logvar = torch.chunk(mu_logvar, chunks=2, dim=-1)
         latent = mu + torch.randn_like(mu)*torch.exp(-0.5*logvar)
-        
         return latent, mu, logvar
 
 @dataclass
@@ -261,16 +271,24 @@ class PairwiseProjectionHead(Base):
     def __init__(self, cfg: PairwiseProjectionHeadCfg):
         super().__init__()
         self.Wqk = nn.Linear(cfg.d_model, cfg.d_down)
-        projection_cfg = ProjectionHeadCfg(d_in=cfg.d_down, d_out=cfg.num_bins)
-        self.proj = ProjectionHead(projection_cfg)
+        self.fc1 = nn.Linear(cfg.d_down, cfg.d_down, bias=False)
+        self.fc2 = nn.Linear(cfg.d_down, cfg.num_bins, bias=False)
 
-    def forward(self, x: Float[T, "ZN d_model"]) -> Float[T, "ZN ZN d_bins"]:
-        qk = self.Wqk(x)
-        q, k = torch.chunk(qk, chunks=2, dim=-1)
-        q, k = q.unsqueeze(0), k.unsqueeze(1)
-        prod, diff = q*k, q-k
-        prod_diff = torch.cat([prod, diff], dim=-1)
-        return self.proj(prod_diff)
+    def forward(self, 
+        loss_fn: Callable,
+        x: Float[T, "ZN d_model"],
+        *args, **kwargs
+    ) -> Float[T, "ZN ZN d_bins"]:
+        '''
+        in order to avoid materializing the full ZNxZNxd_down tensor,
+        this is not called until we are computing the loss function,
+        and to be generalizable to other modules, it also takes in a loss function
+        as an argument, which is implemented as a triton kernel (see proteindiff/training/losses/struct_losses)
+        the output of this module is a size 1, tensor, representing the loss
+        '''
+        qk = self.Wqk(x).reshape(x.shape[0], 2, -1)
+        loss = loss_fn(qk, self.fc1.weight, self.fc2.weight, *args, **kwargs)
+        return loss
 
 
 @dataclass
@@ -291,8 +309,17 @@ class StructProjectionHead(Base):
         self.plddt_proj = PairwiseProjectionHead(cfg.plddt_proj)
         self.pae_proj = PairwiseProjectionHead(cfg.pae_proj)
 
-    def forward(self, struct_logits: Float[T, "ZN d_model"]
-    ) -> Tuple[
+    def forward(
+        self, 
+        struct_logits: Float[T, "ZN d_model"], 
+        coords: Float[T, "ZN 14 3"], 
+        coords_cb: Float[T, "ZN 3"], 
+        unit_vecs: Float[T, "ZN 3"], 
+        frames: Float[T, "ZN 3 3"], 
+        cu_seqlens: Int[T, "Z+1"],
+        min_dist: int,
+        max_dist: int,
+    )-> Tuple[
         Float[T, "ZN ZNN d_dist"], 
         Float[T, "ZN ZNN d_angle"],
         Float[T, "ZN 3"],
@@ -303,16 +330,25 @@ class StructProjectionHead(Base):
         Float[T, "ZN ZNN d_plddt"],
         Float[T, "ZN ZNN d_pae"],
     ]:
-        distogram = self.dist_proj(struct_logits)
-        anglogram = self.angle_proj(struct_logits)
+        distogram_loss = self.dist_proj(distogram_loss_fn, struct_logits, coords_cb, cu_seqlens, min_dist=min_dist, max_dist=max_dist)
+        anglogram_loss = self.angle_proj(anglogram_loss_fn, struct_logits, unit_vecs, cu_seqlens)
 
+        # predict coordinates from logits
         txy = self.frame_proj(struct_logits)
-        t, x, y = torch.chunk(txy, chunks=3, dim=-1)
-        
         sincos = self.torsion_proj(struct_logits)
+        t, x, y = torch.chunk(txy, chunks=3, dim=-1)
         sin, cos = torch.chunk(sincos, chunks=2, dim=-1)
-        
-        plddt = self.plddt_proj(struct_logits)
-        pae = self.pae_proj(struct_logits)
+        # coords_pred = coords_from_txy_sincos(t, x, y, sin, cos) # TODO: implement this
 
-        return distogram, anglogram, t, x, y, sin, cos, plddt, pae
+        # TODO: implement these, eventual calls are commented out
+        dummy_loss = struct_logits.sum()*0
+        distance_loss = dummy_loss # distance_loss_fn(coords_pred, coords, cu_seqlens)
+        angle_loss = dummy_loss # angle_loss_fn(coords_pred, coords, cu_seqlens)
+        plddt_loss = dummy_loss # self.plddt_proj(plddt_loss_fn, struct_logits, coords_pred, coords, cu_seqlens)
+        pae_loss = dummy_loss # self.pae_proj(pae_loss_fn, struct_logits, coords_pred, coords, cu_seqlens)
+
+        return (
+            distogram_loss, anglogram_loss, # coarse grained loss
+            distance_loss, angle_loss, # all_atom loss
+            plddt_loss, pae_loss # confidence loss
+        )

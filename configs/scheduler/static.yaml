@@ -2,4 +2,4 @@ _target_: proteindiff.training.scheduler.SchedulerCfg
 
 d_model: ${model.d_model}
 lr_type: static
-lr_step: 5.0e-4
+lr_step: 1.0e-5

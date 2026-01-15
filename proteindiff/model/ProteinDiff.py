@@ -53,25 +53,18 @@ class ProteinDiff(Base):
 		match stage:
 			case TrainingStage.VAE:
 				(
-					latent, mu, logvar,
+					latent, latent_mu, latent_logvar,
 					divergence_pred, 
 					seq_pred, 
-					distogram, 
-					anglogram, 
-					t, x, y, 
-					sin, cos,
-					plddt, pae, 
-				) = self.vae(divergence, coords_bb, frames, seq_idx, chain_idx, sample_idx, cu_seqlens, max_seqlen)
-				return (
-					latent, mu, logvar,
-					divergence_pred, 
-					divergence,
+					struct_logits,
+					struct_head,
+				) = self.vae_fwd(divergence, coords_bb, frames, seq_idx, chain_idx, sample_idx, cu_seqlens, max_seqlen)
+				return ( 
+					latent, latent_mu, latent_logvar,
+					divergence_pred, divergence,
 					seq_pred, 
-					distogram, 
-					anglogram, 
-					t, x, y, 
-					sin, cos,
-					plddt, pae, 
+					struct_logits, struct_head,
+					coords_bb, frames, # return these two as theyre needed for loss
 				) 
 			case TrainingStage.DIFFUSION:
 				pass
@@ -88,14 +81,10 @@ class ProteinDiff(Base):
 		max_seqlen: int,
 	):
 		(
-            latent, 
-			mu, logvar,
+            latent, latent_mu, latent_logvar,
             divergence_pred, 
             seq_pred,
-            distogram, 
-            anglogram, 
-            t, x, y, sin, cos,
-			plddt, pae, 
+            struct_logits, struct_head,
         ) = self.vae(
 			divergence,
 			coords_bb,
@@ -108,14 +97,10 @@ class ProteinDiff(Base):
 		)
 
 		return (
-            latent, mu, logvar,
+            latent, latent_mu, latent_logvar,
             divergence_pred, 
             seq_pred, 
-            distogram, 
-            anglogram, 
-            t, x, y, 
-			sin, cos,
-			plddt, pae, 
+            struct_logits, struct_head
 		)
 
 	def diffusion_fwd(self):

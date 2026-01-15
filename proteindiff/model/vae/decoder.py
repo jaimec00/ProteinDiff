@@ -32,7 +32,6 @@ class Decoder(Base):
         self.seq_projection_head = SeqProjectionHead(cfg.seq_projection_head)
         self.struct_projection_head = StructProjectionHead(cfg.struct_projection_head)
 
-
     def forward(
         self,
         x: Float[T, "ZN d_latent"],
@@ -41,49 +40,21 @@ class Decoder(Base):
     ) -> Tuple[
         Float[T, "ZN 1 Vx Vy Vz"],
         Float[T, "ZN n_aa"],
-        Float[T, "ZN ZN d_dist"],
-        Float[T, "ZN ZN d_angle"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 7"],
-        Float[T, "ZN 7"],
-        Float[T, "ZN ZN d_plddt"],
-        Float[T, "ZN ZN d_pae"],
+        Float[T, "ZN d_model"],
     ]:
 
         x = self.up_proj(x)
         x = self.transformer(x, cu_seqlens, max_seqlen)
         divergence_pred = self.divergence_projection_head(x)
         seq_pred = self.seq_projection_head(x)
-
-        '''
-        thinking of having struct proj head's forward to simply return the callabl to implement the loss
-        or maybe have it return the weights? no, i dont want the logic of how to run this outside of the module
-        so basically my problem is im preparing for the future once the inputs are quite large
-        i am using a zn tensor for the inputs, and 4 of these output are ZN x ZN. that is a lot of wasted mem,
-        since if we had Z,N we would get Z,N,N. our upside is we dont have padding, so i think i can at least fix that issue
-        will simply also take the sample idx as well and tmp pad the input, get a Z,N,N tensor, unpad (dims 1 and 2), to get a ZNN
-        tensor
-        the other problem was that I think it would be a good idea to make a 2d cel kernel in triton, where the logits and the coords are the input
-        and we dont materialize a ZNN tensor. the more i think of it a triton kernel that directly computes the scaler loss is the way to go
-
-        so the input would be 
-        ZN,d_model logits, 
-        ZN,3 for CaCb vecs
-        Z+1 cu_seqlens
-
-        we compute the labels and the losses on the fly
-        '''
-
-        distogram, anglogram, t, x, y, sin, cos, plddt, pae = self.struct_projection_head(x)
+        
+        # these are passed to the struct_projection head later to directly compute loss
+        # avoids materializing large tensors for pairwise predictions via fused kernels
+        struct_logits = x
 
         return (
             divergence_pred, 
             seq_pred, 
-            distogram, 
-            anglogram, 
-            t, x, y, 
-            sin, cos,
-			plddt, pae, 
+            struct_logits,
+            self.struct_projection_head,
         )

@@ -3,7 +3,7 @@ import torch
 T = torch.Tensor
 
 from jaxtyping import Float, Bool, Int, Union
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Callable
 
 __all__ = [
     "T",
@@ -13,5 +13,6 @@ __all__ = [
     "List",
     "Dict",
     "Tuple",
-    "Any"
+    "Any",
+    "Callable"
 ]

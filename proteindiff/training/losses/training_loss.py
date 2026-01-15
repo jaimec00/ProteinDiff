@@ -18,8 +18,6 @@ from dataclasses import dataclass, field
 @dataclass
 class LossFnCfg:
 	seq_lbl_smooth: float=0.0, 
-	dist_lbl_smooth: float=0.0, 
-	angle_lbl_smooth: float=0.0, 
 	kl_div_weight: float = 0.0,
 	div_mse_weight: float = 0.0,
 	seq_weight: float = 0.0,
@@ -128,8 +126,6 @@ class LossFn:
 
 	def __init__(self, cfg: LossFnCfg):
 		self.seq_cel = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=cfg.seq_lbl_smooth)
-		self.dist_cel = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=cfg.dist_lbl_smooth)
-		self.angle_cel = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=cfg.angle_lbl_smooth)
 		
 		# weights
 		self.kl_div_weight = cfg.kl_div_weight
@@ -144,51 +140,53 @@ class LossFn:
 
 		self.min_dist, self.max_dist = cfg.dist_range
 
-	def vae(
+	def vae_loss(
 		self, 
-		latent_mean, 
-		latent_logvar, 
-		voxels_pred, 
-		voxels_true, 
-		seq_pred, 
-		seq_true, 
-		distogram_pred,
-		anglogram_pred,
-		coords_true, coords_bb_true, frames_true,
-		t, x, y,
-		sin, cos,
-		plddt, pae,
-		sample_idx,
-
+		latent_mu: Float[T, "ZN"],
+		latent_logvar: Float[T, "ZN"],
+		divergence_pred: Float[T, "ZN"],
+		divergence_true: Float[T, "ZN"],
+		seq_pred: Float[T, "ZN"],
+		seq_true: Float[T, "ZN"],
+		struct_logits: Float[T, "ZN"],
+		struct_head: Float[T, "ZN"],
+		coords: Float[T, "ZN"],
+		coords_bb: Float[T, "ZN"],
+		frames: Float[T, "ZN"],
+		cu_seqlens: Int[T, "Z+1"]
 	) -> Dict[str, torch.Tensor]:
 
 		# latent loss
-		kl_div = self.kl_div(latent_mean, latent_logvar)
+		kl_div = self.kl_div(latent_mu, latent_logvar)
 
 		# reconstruction loss
-		div_mse = self.mse(voxels_pred, voxels_true)
+		div_mse = self.mse(divergence_pred, divergence_true)
 
 		# inverse folding loss (+ others)
 		seq_cel, matches, probs = self.seq_loss(seq_pred, seq_true)
 
-		# distogram and anglogram loss
-		distogram_cel, anglogram_cel = distogram_pred.sum()*0, anglogram_pred.sum()*0
-		# self.coarse_struct_loss(distogram_pred, anglogram_pred, coords_bb_true, sample_idx)
+		# get Cb position and CaCb unit vec
+		Cb, CaCb = self.get_Cb_and_CaCb(coords_bb)
 
-		# full struct loss
-		dist_loss, angle_loss, plddt_loss, pae_loss = self.fine_struct_loss(
-			coords_true, 
-			coords_bb_true, 
-			frames_true, 
-			t, 
-			x, 
-			y, 
-			sin, 
-			cos, 
-			plddt, 
-			pae,
-			sample_idx,
+		# structure losses
+		(
+			distogram_cel, 
+			anglogram_cel, 
+			dist_loss, 
+			angle_loss, 
+			plddt_loss, 
+			pae_loss
+		) = struct_head(
+			struct_logits=struct_logits,
+			coords=coords,
+			coords_cb=Cb,
+			unit_vecs=CaCb,
+			frames=frames,
+			cu_seqlens=cu_seqlens,
+			min_dist=self.min_dist,
+			max_dist=self.max_dist,
 		)
+
 
 		full_loss = (
 			self.kl_div_weight*kl_div 
@@ -219,32 +217,13 @@ class LossFn:
 
 		return losses
 
-	def fine_struct_loss(
-		self,
-		coords_true, 
-		coords_bb_true, 
-		frames_true, 
-		t, 
-		x, 
-		y, 
-		sin, 
-		cos, 
-		plddt, 
-		pae,
-		sample_idx,
-	):
-	
-		# TODO: implement this
-		return t.sum()*0, x.sum()*0, y.sum()*0, sin.sum()*0
-
-
 	def diffusion(self, pred: torch.Tensor, trgt: torch.Tensor) -> torch.Tensor:
 		mse = self.mse(pred, trgt)
 		losses = {"diffusion_mse": mse}
 		return losses
 
-	def kl_div(self, z_mu: torch.Tensor, z_logvar: torch.Tensor) -> torch.Tensor:
-		kl_div = -0.5*(1 + z_logvar - z_mu**2 - torch.exp(z_logvar))
+	def kl_div(self, latent_mu: torch.Tensor, latent_logvar: torch.Tensor) -> torch.Tensor:
+		kl_div = -0.5*(1 + latent_logvar - latent_mu**2 - torch.exp(latent_logvar))
 		return kl_div.sum()
 
 	def mse(self, pred: torch.Tensor, trgt: torch.Tensor) -> torch.Tensor:
@@ -267,19 +246,6 @@ class LossFn:
 		probs_sum = (torch.gather(probs, -1, seq_true.unsqueeze(-1))).sum()
 		return probs_sum
 
-	def coarse_struct_loss(self, distogram: torch.Tensor, anglogram: torch.Tensor, coords_bb: torch.Tensor, sample_idx: torch.Tensor) -> Tuple[torch.Tensor]:
-		
-		# get Cb position and CaCb unit vec
-		Cb, CaCb = self.get_Cb_and_CaCb(coords_bb)
-
-		# distogram loss
-		dist_loss = self.distogram_cel(distogram, Cb)
-
-		# anglogram loss
-		angle_loss = self.anglogram_cel(anglogram, CaCb)
-
-		return dist_loss, angle_loss
-
 	def get_Cb_and_CaCb(self, coords_bb: torch.Tensor) -> Tuple[torch.Tensor]:
 
 		# extract Ca and Cb coords
@@ -290,61 +256,4 @@ class LossFn:
 
 		return Cb, CaCb
 
-
-	def distogram_cel(self, distogram, Cb):
-		dist_bins = distogram.size(-1)
-		distogram_true = self.get_dist_lbl(Cb, dist_bins)
-		dist_loss = self.struct_reduce_cel(distogram, distogram_true, mode="distogram")
-		return dist_loss
-
-	def anglogram_cel(self, anglogram, CaCb):
-		angle_bins = anglogram.size(-1)
-		anglogram_true = self.get_angle_lbl(CaCb, angle_bins)
-		angle_loss = self.struct_reduce_cel(anglogram, anglogram_true, mode="anglogram")
-		return angle_loss
-
-	def get_dist_lbl(self, Cb: torch.Tensor, bins: int) -> torch.Tensor:
-
-		# get distogram bins
-		dist_bins = torch.linspace(self.min_dist, self.max_dist, bins, device=Cb.device) # bins,
-
-		# compute true distances
-		true_dists = torch.linalg.vector_norm(Cb.unsqueeze(1) - Cb.unsqueeze(0), dim=-1) # ZN, ZN
-
-		return self.get_lbl(true_dists, dist_bins)
-
-	def get_angle_lbl(self, CaCb: torch.Tensor, bins: int) -> torch.Tensor:
-
-		# get anglogram bins
-		angle_bins = torch.linspace(-1, 1, bins, device=CaCb.device) # bins,
-
-		# compute true distances
-		true_angles = torch.linalg.vecdot(CaCb.unsqueeze(1), CaCb.unsqueeze(0), dim=-1) # ZN, ZN
-
-		return self.get_lbl(true_angles, angle_bins)
-
-	def get_lbl(self, true, bins):
-
-		# get the labels
-		true_lbl = torch.argmin((true.unsqueeze(-1) - bins.reshape(1,1,-1)).abs(), dim=-1) # ZN, ZN
-
-		return true_lbl
-
-	def struct_reduce_cel(self, pred: torch.Tensor, true: torch.Tensor, mode="distogram"):
-
-		# choose criteria
-		match mode:
-			case "distogram": criteria = self.distogram_cel
-			case "anglogram": criteria = self.anglogram_cel
-			case "-": raise ValueError(f"mode must be one of [dist, angle], not {mode}")
-
-		# compute cel, no reduction
-		cel = criteria(pred.reshape(-1, pred.size(-1)), true.reshape(-1)).reshape(pred.shape[:-1]) # ZN,ZN
-
-		# get average for each token
-		# TODO: sum for now, but want avg of each token, need logic for ZN tensors
-		cel = cel.sum(dim=-1) 
-
-		# sum the averages
-		return cel.sum()
 

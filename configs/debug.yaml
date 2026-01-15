@@ -12,6 +12,6 @@ _target_: proteindiff.training.train.training_run.TrainingRunCfg
 
 # training params
 train_stage: vae
-epochs: 5
+epochs: 100
 accumulation_steps: 1
 grad_clip_norm: 5.0

@@ -5,13 +5,11 @@ train_type: vae
 loss_fn:
   _target_: proteindiff.training.losses.LossFnCfg
   seq_lbl_smooth: 0.0
-  dist_lbl_smooth: 0.0
-  angle_lbl_smooth: 0.0
-  kl_div_weight: 1e-6
-  div_mse_weight: 5.0
-  seq_weight: 0.1
+  kl_div_weight: 0.0
+  div_mse_weight: 0.0
+  seq_weight: 0.0
   distogram_weight: 1.0
-  anglogram_weight: 1.0
+  anglogram_weight: 0.0
   dist_weight: 1.0
   angle_weight: 1.0
   plddt_weight: 1.0

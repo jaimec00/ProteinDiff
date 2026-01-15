@@ -42,7 +42,7 @@ class Encoder(Base):
     ) -> tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
 
         x = self.downsample(divergence)
-        x = self.mpnn(bb_coords, frames, seq_idx, chain_idx, sample_idx, x)
+        x = self.mpnn(bb_coords, frames, seq_idx, chain_idx, cu_seqlens, x)
         x = self.transformer(x, cu_seqlens, max_seqlen)
         latent, mu, logvar = self.latent_projection_head(x)
         

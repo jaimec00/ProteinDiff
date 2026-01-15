@@ -60,18 +60,14 @@ class VAEModel(Base):
         (
             divergence_pred, 
             seq_pred, 
-            distogram, 
-            anglogram, 
-            t, x, y, sin, cos,
-			plddt, pae, 
+            struct_logits,
+            struct_head,
         ) = self.decoder(latent, cu_seqlens, max_seqlen)
 
         return (
             latent, mu, logvar,
             divergence_pred, 
             seq_pred, 
-            distogram, 
-            anglogram, 
-            t, x, y, sin, cos,
-			plddt, pae, 
+            struct_logits,
+            struct_head,
         )

@@ -10,6 +10,7 @@ from proteindiff.model.model_utils.mlp import (
 	MPNNMLP, MPNNMLPCfg,
 	FFN, FFNCfg
 )
+from proteindiff.model.mpnn.get_neighbors import get_neighbors
 from proteindiff.types import Float, Int, Bool, T, Tuple, List
 
 
@@ -122,42 +123,11 @@ class EdgeEncoder(Base):
 		frames: Float[T, "ZN 3 3"],
 		seq_pos: Int[T, "ZN"],
 		chain_pos: Int[T, "ZN"],
-		sample_idx: Int[T, "ZN"],
+		cu_seqlens: Int[T, "Z+1"],
 	) -> Tuple[Float[T, "ZN K d_model"], Int[T, "ZN K"], Bool[T, "ZN K"]]:
-		nbrs, nbr_mask = self._get_neighbors(coords_bb, sample_idx)
+		nbrs, nbr_mask = get_neighbors(coords_bb[:, 1, :], self.top_k, cu_seqlens)
 		edges = self._get_edges(coords_bb, frames, seq_pos, chain_pos, nbrs)
 		return edges, nbrs, nbr_mask
-
-	@torch.no_grad()
-	def _get_neighbors(
-		self,
-		C: Float[T, "ZN 4 3"],
-		sample_idx: Int[T, "ZN"],
-	) -> Tuple[Int[T, "ZN K"], Bool[T, "ZN K"]]:
-		# prep
-		Ca = C[:, 1, :]
-		ZN, S = Ca.shape
-
-		# get distances: compute squared distances directly (avoid sqrt for topk since ordering is preserved)
-		diff = Ca.unsqueeze(0) - Ca.unsqueeze(1)  # ZN x ZN x S
-		dists_sq = torch.sum(diff * diff, dim=-1)  # ZN x ZN
-
-		# sequences from other samples dont count (in-place)
-		dists_sq.masked_fill_(sample_idx.unsqueeze(0) != sample_idx.unsqueeze(1), float("inf"))
-
-		# get topk (clamp K to ZN to avoid out of range error)
-		k = min(self.top_k, ZN)
-		topk_result = dists_sq.topk(k, dim=1, largest=False)
-		nbrs_indices = topk_result.indices
-
-		# some samples might have less than K tokens, so create a nbr mask
-		nbr_mask = sample_idx[nbrs_indices] == sample_idx.unsqueeze(1)
-
-		# masked edge idxs are the idx corresponding to the self node
-		node_idxs = torch.arange(ZN, device=dists_sq.device).unsqueeze(1)
-		nbrs = nbrs_indices.where(nbr_mask, node_idxs)
-
-		return nbrs, nbr_mask
 
 	def _get_edges(
 		self,
@@ -254,7 +224,7 @@ class MPNNModel(Base):
 		frames: Float[T, "ZN 3 3"],
 		seq_pos: Int[T, "ZN"],
 		chain_pos: Int[T, "ZN"],
-		sample_idx: Int[T, "ZN"],
+		cu_seqlens: Int[T, "Z+1"],
 		nodes: Float[T, "ZN d_model"],
 	) -> Float[T, "ZN d_model"]:
 		"""
@@ -272,7 +242,7 @@ class MPNNModel(Base):
 			nodes: Updated node features (ZN, d_model)
 		"""
 		# Encode edges from structure
-		edges, nbrs, nbr_mask = self.edge_encoder(coords_bb, frames, seq_pos, chain_pos, sample_idx)
+		edges, nbrs, nbr_mask = self.edge_encoder(coords_bb, frames, seq_pos, chain_pos, cu_seqlens)
 
 		# Apply MPNN blocks
 		for mpnn_block in self.mpnn_blocks:
