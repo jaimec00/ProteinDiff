@@ -10,10 +10,12 @@ import torch
 
 import os
 import hydra
+import mlflow
 from tqdm import tqdm
 from hydra.utils import instantiate
 from dataclasses import dataclass, field
 from omegaconf import OmegaConf as om, DictConfig
+import time
 
 from proteindiff.model import ProteinDiff
 from proteindiff.model.ProteinDiff import ProteinDiffCfg
@@ -28,8 +30,8 @@ from proteindiff.static.constants import TrainingStage
 
 # detect anomolies in training and allow tf32 matmuls (TODO: reconsider tf32?)
 torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 @dataclass
 class TrainingRunCfg:
@@ -44,6 +46,7 @@ class TrainingRunCfg:
 	epochs: int = 10 # TODO: change to steps
 	accumulation_steps: int = 1
 	grad_clip_norm: float = 5.0
+	compile_model: bool = True
 	#TODO: add other stuff relevant to train (keep simple for now)
 
 class TrainingRun:
@@ -57,7 +60,6 @@ class TrainingRun:
 		self.losses = TrainingRunLosses(cfg.losses)
 		self.logger = Logger(cfg.logger)
 		self.model = ProteinDiff(cfg.model).to(self.gpu)
-		# self.model = torch.compile(self.model, dynamic=True)
 		self.optim = setup_optim(cfg.optim, self.model)
 		self.scheduler = setup_scheduler(cfg.scheduler, self.optim)
 
@@ -65,10 +67,22 @@ class TrainingRun:
 		self.epochs = cfg.epochs
 		self.accumulation_steps = cfg.accumulation_steps
 		self.grad_clip_norm = cfg.grad_clip_norm
+		self.cfg = cfg
 
-		self.train()
-		self.test()
-		self.log("fin", fancy=True)
+		self.log(f"configuration:\n\n{om.to_yaml(self.cfg)}", fancy=True)
+		num_params = sum(p.numel() for p in self.model.parameters())
+		self.log(f"model initialized with {num_params:,} parameters", fancy=True)
+
+		if cfg.compile_model:
+			self.log("compiling model...")
+			self.model = torch.compile(self.model, dynamic=True)
+
+
+		with mlflow.start_run():
+			self.last_ts = time.perf_counter()
+			self.train()
+			self.test()
+			self.log("fin", fancy=True)
 
 
 	def train(self):
@@ -86,13 +100,13 @@ class TrainingRun:
 			# make sure in training mode
 			self.model.train()
 
-			# setup the epoch # TODO: helper for get last lr
-			self.logger.log_epoch(epoch_idx, self.scheduler.last_epoch, self.scheduler.get_last_lr()[0])
+			# log some info
+			self.logger.log_epoch(epoch_idx, self.last_step, self.last_lr)
 
 			# clear temp losses
 			self.losses.clear_tmp_losses()
 
-			epoch_pbar = tqdm(total=len(self.data.train), desc="training progress", unit="samples")
+			epoch_pbar = self._create_pbar(len(self.data.train), "training progress")
 
 			# loop through batches
 			for b_idx, data_batch in enumerate(self.data.train):
@@ -101,10 +115,11 @@ class TrainingRun:
 				self.batch_learn(data_batch, b_idx)
 
 				# update pbar
-				if b_idx % 10 ==0:
-					epoch_pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
-				epoch_pbar.update(data_batch.samples)
-			
+				self._update_pbar(epoch_pbar, data_batch, b_idx)
+
+				# log the step
+				self.log_step(self.losses.tmp, data_batch)
+
 			# log epoch losses and save avg 
 			epoch_losses = self.losses.tmp.get_avg()
 			self.logger.log_losses(epoch_losses, mode="train")
@@ -130,21 +145,19 @@ class TrainingRun:
 		self.losses.clear_tmp_losses()
 
 		# progress bar
-		val_pbar = tqdm(total=len(self.data.val), desc="validation progress", unit="samples")
+		val_pbar = self._create_pbar(len(self.data.val), "validation progress")
 
 		# loop through validation batches
 		for b_idx, data_batch in enumerate(self.data.val):
-				
+
 			# run the model
 			self.batch_forward(data_batch)
 
-			if b_idx % 10 == 0:
-				val_pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
-			val_pbar.update(data_batch.samples)
+			self._update_pbar(val_pbar, data_batch, b_idx)		
 
 		# log the losses
 		val_losses = self.losses.tmp.get_avg()
-		self.logger.log_losses(val_losses, mode="val")
+		self.log_val(val_losses)
 		self.losses.val.add_losses(val_losses)
 
 	@torch.no_grad()
@@ -157,29 +170,21 @@ class TrainingRun:
 		self.log("starting testing", fancy=True)
 		
 		# progress bar
-		test_pbar = tqdm(total=len(self.data.test), desc="test progress", unit="samples")
+		test_pbar = self._create_pbar(len(self.data.test), "test progress")
 
 		# loop through testing batches
 		for b_idx, data_batch in enumerate(self.data.test):
-				
+
 			# run the model
 			self.batch_forward(data_batch)
 
 			# update pbar
-			if b_idx % 10 == 0:
-				test_pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
-			test_pbar.update(data_batch.samples)
+			self._update_pbar(test_pbar, data_batch, b_idx)
 		
 		# log the losses
 		test_losses = self.losses.tmp.get_avg()
 		self.logger.log_losses(test_losses, mode="test")
 		self.losses.test.extend_losses(self.losses.tmp)
-
-	def log(self, message, fancy=False):
-		if fancy:
-			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
-		self.logger.log.info(message)
-
 
 	def batch_learn(self, data_batch, b_idx):
 		self.batch_forward(data_batch)
@@ -192,17 +197,16 @@ class TrainingRun:
 
 		# for vae training
 		if self.train_stage==TrainingStage.VAE:
-						
+
 			(
 				latent,
 				latent_mu, latent_logvar,
 				divergence_pred, divergence_true,
 				seq_pred,
 				struct_logits, struct_head,
-				coords_bb, frames
 			) = self.model(
-				coords=data_batch.coords, 
-				labels=data_batch.labels, 
+				coords=data_batch.coords,
+				labels=data_batch.labels,
 				atom_mask=data_batch.atom_mask,
 				seq_idx=data_batch.seq_idx,
 				chain_idx=data_batch.chain_idx,
@@ -211,21 +215,20 @@ class TrainingRun:
 				max_seqlen=data_batch.max_seqlen,
 				stage=TrainingStage.VAE,
 			)
-				
+
 			# compute loss
 			losses = self.losses.loss_fn.vae_loss(
-				latent_mu=latent_mu, 
-				latent_logvar=latent_logvar, 
-				divergence_pred=divergence_pred, 
-				divergence_true=divergence_true, 
-				seq_pred=seq_pred, 
+				latent_mu=latent_mu,
+				latent_logvar=latent_logvar,
+				divergence_pred=divergence_pred,
+				divergence_true=divergence_true,
+				seq_pred=seq_pred,
 				seq_true=data_batch.labels,
-				struct_logits=struct_logits, 
+				struct_logits=struct_logits,
 				struct_head=struct_head,
-				coords=data_batch.coords, 
-				coords_bb=coords_bb, 
-				frames=frames,
-				cu_seqlens=data_batch.cu_seqlens
+				coords=data_batch.coords,
+				cu_seqlens=data_batch.cu_seqlens,
+				atom_mask=data_batch.atom_mask,
 			)
 
 		# diffusion training
@@ -253,13 +256,77 @@ class TrainingRun:
 			self.scheduler.step()
 			self.optim.zero_grad()
 
+	def log_step(self, losses, data_batch):
+		
+		# get delta time or update last time
+		cur_ts = time.perf_counter()
+		if self.last_step % self.logger.log_interval != 0:
+			self.last_ts = cur_ts
+			return 
+		delta_ts = cur_ts - self.last_ts
+
+		# create the metrics
+		losses_dict = losses.get_last_losses(scale=1/len(data_batch))
+		data_dict = {"toks_per_batch": len(data_batch), "samples_per_batch": data_batch.seqlens.size(0)}
+		throughput_dict = {"toks_per_sec": len(data_batch) / delta_ts, "updates_per_sec": 1 / delta_ts}
+
+		# format
+		losses_dict = {f"train/loss/{k}": v for k, v in losses_dict.items()}
+		data_dict = {f"train/data/{k}": v for k, v in data_dict.items()}
+		throughput_dict = {f"train/throughput/{k}": v for k, v in throughput_dict.items()}
+		scheduler_dict = {f"train/lr": self.last_lr}
+		
+		# combine
+		step_dict = losses_dict | data_dict | scheduler_dict| throughput_dict
+
+		self.logger.log_step(step_dict, self.last_step)
+
+	def log_val(self, losses):
+		self.logger.log_losses(losses, mode="val")
+		self.logger.log_step({f"val/loss/{k}": v for k, v in losses.items()}, self.last_step)
+
+	def log(self, message, fancy=False):
+		if fancy:
+			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
+		self.logger.log.info(message)
+
+	def _create_pbar(self, total: int, desc: str) -> tqdm:
+		"""Create a progress bar for training/validation/test loops."""
+		return tqdm(total=total, desc=desc, unit="samples")
+
+	def _update_pbar(self, pbar: tqdm, data_batch, b_idx: int):
+		"""Update progress bar with loss and advance by batch samples."""
+		if b_idx % 10 == 0:
+			pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
+		pbar.update(data_batch.samples)
+
+	@property
+	def last_lr(self):
+		return self.scheduler.get_last_lr()[0]
+
+	@property
+	def last_step(self):
+		'''just for clearer naming'''
+		return int(self.scheduler.last_epoch)
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="debug")
 def main(cfg: DictConfig):
 	# build model from simple cfg
-	from proteindiff.utils.cfg_utils.model_cfg_utils import build_model_cfg_from_simple_cfg
+	import importlib
 	simple_model_cfg = instantiate(cfg.model)
-	model_cfg = build_model_cfg_from_simple_cfg(simple_model_cfg)
+	try:
+		model_factory_path = simple_model_cfg.model_factory.split(".")                                                                        
+		module_path = ".".join(model_factory_path[:-1])                                                                                       
+		function_name = model_factory_path[-1]                                                                                                
+		module = importlib.import_module(module_path)                                                                                         
+		model_factory = getattr(module, function_name)
+	except (ImportError, AttributeError) as e:
+          raise ImportError(                                                                                                                    
+              f"failed to import model_factory at {simple_model_cfg.model_factory}. "                                                           
+              "make sure the path is correct"                                                                                                   
+          ) from e     
+		  
+	model_cfg = model_factory(simple_model_cfg)
 	cfg.model = om.structured(model_cfg)
 	
 	TrainingRun(cfg)

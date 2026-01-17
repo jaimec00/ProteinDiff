@@ -6,7 +6,6 @@ description:	utility classes for input/output operations during training
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
-import matplotlib.pyplot as plt
 from pathlib import Path
 import textwrap
 import logging
@@ -20,6 +19,7 @@ import warnings
 import shutil 
 from dataclasses import dataclass
 from hydra.core.hydra_config import HydraConfig
+import mlflow
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -28,24 +28,27 @@ class LoggerCfg:
 	out_path: str = ""
 	experiment_name: str = "debug"
 	overwrite: bool = False
+	log_system_metrics: bool = True
+	system_metrics_sample_interval: int = 10 # seconds between each system metric collection
+	system_metrics_log_interval: int = 1 # number of samples to collect before aggregating
+	log_interval: int = 10 # number of steps to log training at, no aggregation, just a sample
 
 class Logger():
 
 	def __init__(self, cfg: LoggerCfg):
 
 		self.out_path = Path(HydraConfig.get().runtime.output_dir)
-		self.plot_path = self.out_path / "plots"
 		self.log = logging.getLogger(__name__)
+		self.log_interval = cfg.log_interval
 
-	def log_trainingrun(self):
-		'''basically just prints the config file w/ a little more info'''
-
-		# TODO: implement this once the config format is locked down
-		log = 	textwrap.dedent(f'''
-			nothing rn
-		''')
-
-		self.log.info(log)
+		if cfg.log_system_metrics:
+			mlflow.enable_system_metrics_logging()
+			mlflow.set_system_metrics_sampling_interval(cfg.system_metrics_sample_interval)
+			mlflow.set_system_metrics_samples_before_logging(cfg.system_metrics_log_interval)
+		else:
+			mlflow.disable_system_metrics_logging()
+		
+		mlflow.set_experiment(cfg.experiment_name)
 
 	def log_epoch(self, epoch, step, current_lr):
 
@@ -64,32 +67,9 @@ class Logger():
 		for loss_type, loss in losses_dict.items():
 			self.log.info(f"{mode} {loss_type} per token: {str(loss)}")	
 		self.log.info("")
+			
+
+	def log_step(self, step_metrics, step):
+		mlflow.log_metrics(metrics=step_metrics, step=step)
 	
-
-	def plot_training(self, losses):
-
-		# convert to numpy arrays
-		losses.to_numpy()
-
-		# make the output directory
-		self.plot_path.mkdir(exist_ok=True)
-
-		# specify number of epochs
-		epochs = np.arange(len(losses.train))
-
-		# extract the keys and iterate
-		loss_types = losses.val.losses.keys()
-		for loss_type in loss_types:
-			plt.plot(epochs, losses.train.losses[loss_type], marker='o', color='red', label="Training")
-			plt.plot(epochs, losses.val.losses[loss_type], marker='o', color='blue', label="Validation")
-			plt.title(f'{loss_type} vs. Epochs')
-			plt.xlabel('Epochs')
-			plt.ylabel(loss_type)
-			plt.legend()
-			plt.grid(True)
-			loss_path = self.plot_path / Path(f"{'_'.join(loss_type.lower().split(' '))}.png")
-			plt.savefig(loss_path)
-			self.log.info(f"Plot of {loss_type} vs. Epochs saved to {loss_path}")
-			plt.figure()
-
 # ----------------------------------------------------------------------------------------------------------------------

@@ -21,7 +21,7 @@ def setup_scheduler(cfg: SchedulerCfg, optim: Optimizer):
         def attn(step):
             '''lr scheduler from attn paper'''
             step = step # in case job gets cancelled and want to start from where left off
-            return scale * min((step+1)**(-0.5), (step+1)*(scheduler.warmup_steps**(-1.5)))
+            return scale * min((step+1)**(-0.5), (step+1)*(cfg.warmup_steps**(-1.5)))
 
         scheduler = lr_scheduler.LambdaLR(optim, attn)
 

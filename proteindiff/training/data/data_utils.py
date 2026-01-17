@@ -155,6 +155,9 @@ class DataBatch:
 		trgt_mask = []
 		homo_mask = []
 
+		if not batch_list:
+			raise ValueError
+
 		for idx, asmb in enumerate(batch_list):
 			
 			asmb.construct() # materialize the full tensors (including AU copies)
@@ -188,10 +191,16 @@ class DataBatch:
 		self.coords_mask = self.atom_mask[:, :3].all(dim=-1) # means not missing any bb coords, ZN
 		self.caa_mask = self.labels!=aa_2_lbl("X") # non canonical amino acids, ZN
 		self.valid_mask = self.coords_mask & self.caa_mask
+		if not self.valid_mask.any():
+			print(f"Empty batch! coords_mask: {self.coords_mask.sum()}, caa_mask: {self.caa_mask.sum()}")                                                             
+			for idx, asmb in enumerate(batch_list):                                         
+				print(f"  asmb {idx}: {getattr(asmb, 'pdb_id', 'unknown')}")            
+						
 		self.apply_mask(self.valid_mask)
 		
 	@torch.no_grad
 	def set_cu_seqlens(self):
+
 		_, self.seqlens = torch.unique_consecutive(self.sample_idx, return_counts=True)
 		self.cu_seqlens = torch.nn.functional.pad(self.seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
 		self.max_seqlen = self.seqlens.max(dim=0).values.item()
