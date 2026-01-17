@@ -9,6 +9,13 @@ platforms = ["linux-64"]
 cpu = { features = ["cpu"] , solve-group = "cpu" }
 gpu = { features = ["gpu"] , solve-group = "gpu" }
 
+[activation.env]
+EXP_DIR = "$HOME/proteinDiffVirgina/experiments"
+MLFLOW_TRACKING_URI = "sqlite:///$EXP_DIR/mlruns.db"
+
+[tasks]
+local_mlflow = "mlflow server --host localhost --port 5000 --backend-store-uri $MLFLOW_TRACKING_URI --registry-store-uri $MLFLOW_TRACKING_URI --default-artifact-root $EXP_DIR/mlruns"
+
 [dependencies]
 python = ">=3.12"
 pytorch = ">=2.9,<2.10"
@@ -27,6 +34,8 @@ pytest = "*"
 [pypi-dependencies]
 jaxtyping = "*"
 proteindiff = { path = ".", editable = true }
+mlflow = "*"
+psutil = "*"
 
 [feature.cpu]
 
@@ -40,4 +49,8 @@ cuda = "12"
 [feature.gpu.dependencies]
 cuda = ">=12.9,<12.10"
 flash-attn = ">=2.8"
+
+[feature.gpu.pypi-dependencies]
+nvidia-ml-py = "*"
+
 

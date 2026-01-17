@@ -15,8 +15,8 @@ test/
 test_data/
 runs/
 pdb_2021aug02_sample/
-.claude
 *.egg-info
 .pytest_cache
 .pixi
 pixi.lock
+.vscode

@@ -1,21 +1,21 @@
-# Multimodal Protein Model with Mixture of Queries (MoQ)
+# ProteinDiff
 
-A multimodal protein generative model that understands and generates proteins conditioned on partial sequence and/or structure. Uses **Mixture of Queries (MoQ)** to compress variable-length proteins into fixed-size latent vectors.
+A multimodal protein generative model that generates proteins conditioned on partial sequence and/or structure. Uses a VAE with per-residue latents followed by latent diffusion.
 
 **Status**: Architecture design phase
 
 ## Key Features
 
-- **Fixed-size latents** - stable diffusion training, latent interpolation
+- **Per-residue latents** - each residue maps to a latent vector for fine-grained representation
 - **Flexible conditioning** - generate from any combo of partial sequence/structure
 - **Multi-task learning** - reconstructs sequence, structure, geometry simultaneously
 
 ## Architecture
 
-1. **VAE Encoder**: CNN → GNN → Transformer → MoQ compression → latent sampling
-2. **VAE Decoder**: cross-attention from positional tokens to latents → multi-task heads
-3. **Conditioning Network**: encodes partial seq/struct via hybrid GNN + 1D-CNN
-4. **Latent Diffusion**: DiT-style denoising with AdaLN conditioning
+1. **Tokenizer**: Converts atomic coordinates to voxelized electric field divergence representation
+2. **VAE Encoder**: CNN Downsample → MPNN → Transformer → Latent Projection (mu, logvar)
+3. **VAE Decoder**: Up Projection → Transformer → Multi-task heads (divergence, sequence, structure)
+4. **Latent Diffusion**: DiT-style denoising (planned)
 
 ## Training
 
