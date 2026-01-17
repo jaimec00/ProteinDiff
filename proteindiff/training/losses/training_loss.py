@@ -8,6 +8,7 @@ import numpy as np
 import math
 
 from proteindiff.static.constants import canonical_aas
+from proteindiff.utils.struct_utils import get_bb_vecs
 from typing import Dict, List
 
 from dataclasses import dataclass, field
@@ -78,7 +79,7 @@ class LossHolder:
 				"pae_loss": [],
 			}
 		elif train_type=="diffusion":
-			self.losses = {"diffusion_mse": []}
+			self.losses = {"full_loss": [], "diffusion_mse": []}
 		
 		# to scale losses for logging, does not affect backprop
 		self.valid_toks = 0 # valid tokens to compute avg per token
@@ -113,7 +114,10 @@ class LossHolder:
 		self.losses = {loss_type: [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else loss for loss in losses] for loss_type, losses in self.losses.items()}
 
 	def get_last_loss(self) -> float | torch.Tensor:
-		return self.losses[list(self.losses.keys())[0]][-1]
+		return self.losses["full_loss"][-1]
+
+	def get_last_losses(self, scale=1):
+		return {k: losses[-1].item()*scale for k, losses in self.losses.items()}
 
 	def __len__(self) -> int:
 		return len(self.losses[list(self.losses.keys())[0]])
@@ -141,7 +145,7 @@ class LossFn:
 		self.min_dist, self.max_dist = cfg.dist_range
 
 	def vae_loss(
-		self, 
+		self,
 		latent_mu: Float[T, "ZN"],
 		latent_logvar: Float[T, "ZN"],
 		divergence_pred: Float[T, "ZN"],
@@ -149,11 +153,10 @@ class LossFn:
 		seq_pred: Float[T, "ZN"],
 		seq_true: Float[T, "ZN"],
 		struct_logits: Float[T, "ZN"],
-		struct_head: Float[T, "ZN"],
-		coords: Float[T, "ZN"],
-		coords_bb: Float[T, "ZN"],
-		frames: Float[T, "ZN"],
-		cu_seqlens: Int[T, "Z+1"]
+		struct_head,
+		coords: Float[T, "ZN 14 3"],
+		cu_seqlens: Int[T, "Z+1"],
+		atom_mask: Bool[T, "ZN, 14"],
 	) -> Dict[str, torch.Tensor]:
 
 		# latent loss
@@ -165,24 +168,25 @@ class LossFn:
 		# inverse folding loss (+ others)
 		seq_cel, matches, probs = self.seq_loss(seq_pred, seq_true)
 
-		# get Cb position and CaCb unit vec
-		Cb, CaCb = self.get_Cb_and_CaCb(coords_bb)
+		# get Cb position and unit vecs from full coords
+		Cb, unit_vecs = get_bb_vecs(coords)
 
 		# structure losses
 		(
-			distogram_cel, 
-			anglogram_cel, 
-			dist_loss, 
-			angle_loss, 
-			plddt_loss, 
+			distogram_cel,
+			anglogram_cel,
+			dist_loss,
+			angle_loss,
+			plddt_loss,
 			pae_loss
 		) = struct_head(
 			struct_logits=struct_logits,
 			coords=coords,
 			coords_cb=Cb,
-			unit_vecs=CaCb,
-			frames=frames,
+			unit_vecs=unit_vecs,
 			cu_seqlens=cu_seqlens,
+			labels=seq_true,
+			atom_mask=atom_mask,
 			min_dist=self.min_dist,
 			max_dist=self.max_dist,
 		)
@@ -245,15 +249,4 @@ class LossFn:
 		probs = torch.softmax(seq_pred, dim=-1)
 		probs_sum = (torch.gather(probs, -1, seq_true.unsqueeze(-1))).sum()
 		return probs_sum
-
-	def get_Cb_and_CaCb(self, coords_bb: torch.Tensor) -> Tuple[torch.Tensor]:
-
-		# extract Ca and Cb coords
-		Ca, Cb = coords_bb[:, 1, :], coords_bb[:, 3, :]
-
-		# compute Ca->Cb unit vec
-		CaCb = F.normalize(Cb-Ca, p=2, dim=-1, eps=1e-12)
-
-		return Cb, CaCb
-
 

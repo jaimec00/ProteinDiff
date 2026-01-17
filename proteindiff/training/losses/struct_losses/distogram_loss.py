@@ -5,12 +5,13 @@ import torch
 from proteindiff.types import Float, Int, T
 
 
-@triton.autotune(configs=[
+@triton.autotune(
+    configs=[
         triton.Config(kwargs={}, num_warps=w)
         for w in [4, 8, 16]
     ],
-    key=["BLOCK_D"]
-
+    key=["BLOCK_D"],
+    restore_value=["per_token_loss_ptr", "d_logits_ptr", "d_fc1_ptr", "d_fc2_ptr", "d_coords_ptr"],
 )
 @triton.jit
 def distogram_loss_fwd_bwd(
@@ -69,7 +70,7 @@ def distogram_loss_fwd_bwd(
     offs_h = tl.arange(0, BLOCK_D)  # for hidden dim
     offs_o = tl.arange(0, BLOCK_D)  # for output dim
 
-    # load fc1 (d_hidden, 2*d_in) - first and second halves (keep in fp16 for tensor core)
+    # load fc1 (d_hidden, 2*d_in) - first and second halves
     fc1_mask = (offs_h[:, None] < d_hidden) & (offs[None, :] < d_in)
     fc1_first = tl.load(
         fc1_ptr + offs_h[:, None] * stride_fc1_hidden + offs[None, :] * stride_fc1_in,
@@ -80,14 +81,14 @@ def distogram_loss_fwd_bwd(
         mask=fc1_mask, other=0.0
     )
 
-    # load fc2 (d_out, d_hidden) (keep in fp16 for tensor core)
+    # load fc2 (d_out, d_hidden)
     fc2_mask = (offs_o[:, None] < d_out) & (offs_h[None, :] < d_hidden)
     fc2 = tl.load(
         fc2_ptr + offs_o[:, None] * stride_fc2_out + offs_h[None, :] * stride_fc2_hidden,
         mask=fc2_mask, other=0.0
     )
 
-    # load q[i], k[i] (keep in fp16 for tensor core)
+    # load q[i], k[i]
     qi_ptr = logits_ptr + pid * stride_logits_zn + 0 * stride_logits_2 + offs * stride_logits_d
     ki_ptr = logits_ptr + pid * stride_logits_zn + 1 * stride_logits_2 + offs * stride_logits_d
     qi = tl.load(qi_ptr, mask=offs < d_in, other=0.0)
@@ -110,7 +111,7 @@ def distogram_loss_fwd_bwd(
     for j in range(seq_start, seq_end):
         valid = True
 
-        # load q[j], k[j] (keep in fp16 for tensor core)
+        # load q[j], k[j]
         qj_ptr = logits_ptr + j * stride_logits_zn + 0 * stride_logits_2 + offs * stride_logits_d
         kj_ptr = logits_ptr + j * stride_logits_zn + 1 * stride_logits_2 + offs * stride_logits_d
         qj = tl.load(qj_ptr, mask=offs < d_in, other=0.0)
@@ -143,21 +144,17 @@ def distogram_loss_fwd_bwd(
         qk_mul_masked = tl.where(d_mask, qk_mul, 0.0)
         qk_sub_masked = tl.where(d_mask, qk_sub, 0.0)
 
-        # fc1_first @ qk_mul + fc1_second @ qk_sub using tl.dot (fp16)
+        # fc1_first @ qk_mul + fc1_second @ qk_sub using tl.dot
         # reshape vectors to 2D: (BLOCK_D,) -> (BLOCK_D, 1), then sum axis=1 to squeeze
         hidden_pre = (tl.sum(tl.dot(fc1_first, qk_mul_masked[:, None]), axis=1) +
                       tl.sum(tl.dot(fc1_second, qk_sub_masked[:, None]), axis=1))
         hidden_pre = tl.where(h_mask, hidden_pre, 0.0)
-        # keep hidden in fp16 for next tl.dot
-        hidden = tl.maximum(hidden_pre, 0.0).to(fc2.dtype)  # relu
+        hidden = tl.maximum(hidden_pre, 0.0)  # relu
         relu_mask = (hidden_pre > 0) & h_mask
 
-        # out_logits = fc2 @ hidden using tl.dot (fp16)
+        # out_logits = fc2 @ hidden using tl.dot
         out_logits = tl.sum(tl.dot(fc2, hidden[:, None]), axis=1)
         out_logits = tl.where(o_mask, out_logits, 0.0)
-
-        # cast to fp32 for loss computation (softmax, cross entropy)
-        out_logits = out_logits.to(tl.float32)
 
         # log_softmax for numerical stability (avoid underflow in exp)
         out_max = tl.max(tl.where(o_mask, out_logits, -1e9))
@@ -181,42 +178,32 @@ def distogram_loss_fwd_bwd(
 
         # grad_h = fc2.T @ d_out_logits using tl.dot with transpose
         # fc2 is (d_out, d_hidden), fc2.T is (d_hidden, d_out)
-        # cast to fp32 for backward computation
-        fc2_f32 = fc2.to(tl.float32)
-        fc2_t = tl.trans(fc2_f32)
+        fc2_t = tl.trans(fc2)
         grad_h = tl.sum(tl.dot(fc2_t, d_out_logits_masked[:, None]), axis=1)
         grad_h = tl.where(h_mask, grad_h, 0.0)
 
-        # d_fc2 += outer(d_out_logits, hidden) - hidden needs to be fp32
-        hidden_f32 = hidden.to(tl.float32)
-        d_fc2_local = d_out_logits[:, None] * hidden_f32[None, :]
+        # d_fc2 += outer(d_out_logits, hidden)
+        d_fc2_local = d_out_logits[:, None] * hidden[None, :]
 
         # relu backward
         grad_h = tl.where(relu_mask, grad_h, 0.0)
 
-        # d_fc1 += outer(grad_h, qk_mul/qk_sub) - qk needs to be fp32
-        qk_mul_f32 = qk_mul.to(tl.float32)
-        qk_sub_f32 = qk_sub.to(tl.float32)
-        d_fc1_first_local = grad_h[:, None] * qk_mul_f32[None, :]
-        d_fc1_second_local = grad_h[:, None] * qk_sub_f32[None, :]
+        # d_fc1 += outer(grad_h, qk_mul/qk_sub)
+        d_fc1_first_local = grad_h[:, None] * qk_mul[None, :]
+        d_fc1_second_local = grad_h[:, None] * qk_sub[None, :]
 
         # d_qk_mul = fc1_first.T @ grad_h, d_qk_sub = fc1_second.T @ grad_h using tl.dot
         grad_h_masked = tl.where(h_mask, grad_h, 0.0)
-        fc1_first_f32 = fc1_first.to(tl.float32)
-        fc1_second_f32 = fc1_second.to(tl.float32)
-        fc1_first_t = tl.trans(fc1_first_f32)
-        fc1_second_t = tl.trans(fc1_second_f32)
+        fc1_first_t = tl.trans(fc1_first)
+        fc1_second_t = tl.trans(fc1_second)
         d_qk_mul = tl.sum(tl.dot(fc1_first_t, grad_h_masked[:, None]), axis=1)
         d_qk_sub = tl.sum(tl.dot(fc1_second_t, grad_h_masked[:, None]), axis=1)
         d_qk_mul = tl.where(d_mask, d_qk_mul, 0.0)
         d_qk_sub = tl.where(d_mask, d_qk_sub, 0.0)
 
         # d_qi = d_qk_mul * kj + d_qk_sub, d_kj = d_qk_mul * qi - d_qk_sub
-        # cast q, k to fp32 for gradient computation
-        qi_f32 = qi.to(tl.float32)
-        kj_f32 = kj.to(tl.float32)
-        d_qi_local = d_qk_mul * kj_f32 + d_qk_sub
-        d_kj_local = d_qk_mul * qi_f32 - d_qk_sub
+        d_qi_local = d_qk_mul * kj + d_qk_sub
+        d_kj_local = d_qk_mul * qi - d_qk_sub
 
         # accumulate (masked by valid)
         loss_acc += tl.where(valid, loss_contrib, 0.0)
@@ -305,12 +292,12 @@ class DistogramLoss(torch.autograd.Function):
         fc1_dtype = fc1.dtype
         fc2_dtype = fc2.dtype
 
-        # coords in fp32 for distance computation, logits/fc1/fc2 in fp16 for tensor core
+        # all computation in fp32
         coords = coords.to(torch.float32).contiguous()
-        logits = logits.to(torch.float16).contiguous()
+        logits = logits.to(torch.float32).contiguous()
         cu_seqlens = cu_seqlens.to(torch.int32).contiguous()
-        fc1 = fc1.to(torch.float16).contiguous()
-        fc2 = fc2.to(torch.float16).contiguous()
+        fc1 = fc1.to(torch.float32).contiguous()
+        fc2 = fc2.to(torch.float32).contiguous()
 
         # allocate outputs (use fp32 for accuracy)
         per_token_loss = torch.zeros(ZN, device=coords.device, dtype=torch.float32)
