@@ -3,3 +3,7 @@ _target_: proteindiff.training.logger.LoggerCfg
 out_path: /home/jaime/Desktop/scratch/experiments
 experiment_name: debug
 overwrite: true
+log_system_metrics: true
+system_metrics_sample_interval: 10
+system_metrics_log_interval: 1
+log_interval: 10

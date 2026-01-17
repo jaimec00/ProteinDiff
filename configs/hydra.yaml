@@ -5,32 +5,3 @@ hydra:
   sweep:
     dir: /home/ubuntu/proteinDiffVirgina/experiments/sweep/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.override_dir}
-
-  # job_logging:
-  #   version: 1
-  #   disable_existing_loggers: false
-
-  #   formatters:
-  #     simple:
-  #       format: "[%(asctime)s][%(levelname)s] %(name)s: %(message)s"
-
-  #   handlers:
-  #     stdout_file:
-  #       class: logging.FileHandler
-  #       formatter: simple
-  #       filename: ${hydra.run.dir}/stdout.log
-  #       mode: a
-  #       level: INFO
-  #       stream: ext://sys.stdout
-
-  #     stderr_file:
-  #       class: logging.FileHandler
-  #       formatter: simple
-  #       filename: ${hydra.run.dir}/stderr.log
-  #       mode: a
-  #       level: ERROR
-  #       stream: ext://sys.stderr
-
-  #   root:
-  #     level: INFO
-  #     handlers: [stdout_file, stderr_file]

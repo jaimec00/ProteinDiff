@@ -1,11 +1,12 @@
 _target_: proteindiff.utils.cfg_utils.model_cfg_utils.SimpleProteinDiffCfg
 
 d_model: 256
-d_latent: 16
+d_latent: 32
 voxel_dim: 8
 cell_dim: 1.0
 t_max: 100
 n_mpnn_blocks: 3
-n_transformer_blocks: 6
+n_transformer_blocks: 8
 n_dit_blocks: 1
-n_heads: 16
+n_heads: 32
+model_factory: proteindiff.utils.model_factories.base_model.build_model_cfg_from_simple_cfg

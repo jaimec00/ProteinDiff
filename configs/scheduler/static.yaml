@@ -1,5 +1,6 @@
 _target_: proteindiff.training.scheduler.SchedulerCfg
 
 d_model: ${model.d_model}
-lr_type: static
-lr_step: 1.0e-5
+lr_type: attn
+lr_step: 5.0e-5
+warmup_steps: 500 
