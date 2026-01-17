@@ -54,17 +54,16 @@ class ProteinDiff(Base):
 			case TrainingStage.VAE:
 				(
 					latent, latent_mu, latent_logvar,
-					divergence_pred, 
-					seq_pred, 
+					divergence_pred,
+					seq_pred,
 					struct_logits,
 					struct_head,
 				) = self.vae_fwd(divergence, coords_bb, frames, seq_idx, chain_idx, sample_idx, cu_seqlens, max_seqlen)
-				return ( 
+				return (
 					latent, latent_mu, latent_logvar,
 					divergence_pred, divergence,
-					seq_pred, 
+					seq_pred,
 					struct_logits, struct_head,
-					coords_bb, frames, # return these two as theyre needed for loss
 				) 
 			case TrainingStage.DIFFUSION:
 				pass

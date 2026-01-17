@@ -5,24 +5,18 @@ import torch.nn as nn
 from dataclasses import dataclass, field
 from einops import rearrange
 import math
-import warnings
-warnings.filterwarnings( # nn.Conv3d warnings w/ even kernel lengths and "same" padding create copies of the input tensor
-    "ignore",
-    category=UserWarning,
-    module="torch.nn.modules.conv"
-)
 
 from proteindiff.model.model_utils.mlp import MLP, MLPCfg, ProjectionHead, ProjectionHeadCfg
 from proteindiff.model.base import Base
 from proteindiff.static.constants import canonical_aas
-from proteindiff.types import List, Float, Int, T, Tuple, Callable
+from proteindiff.types import Bool, List, Float, Int, T, Tuple, Callable
 
 from proteindiff.training.losses.struct_losses.distogram_loss import distogram_loss as distogram_loss_fn
 from proteindiff.training.losses.struct_losses.anglogram_loss import anglogram_loss as anglogram_loss_fn
+from proteindiff.utils.struct_utils import coords_from_txy_sincos
+from proteindiff.training.losses.struct_losses.distance_loss import distance_loss as distance_loss_fn
 
 # not implemented yet
-# from proteindiff.utils.struct_utils import coords_from_txy_sincos
-# from proteindiff.training.losses.struct_losses.distance_loss import distance_loss as distance_loss_fn
 # from proteindiff.training.losses.struct_losses.angle_loss import angle_loss as angle_loss_fn
 # from proteindiff.training.losses.struct_losses.plddt_loss import plddt_loss as plddt_loss_fn
 # from proteindiff.training.losses.struct_losses.pae_loss import pae_loss as pae_loss_fn
@@ -31,24 +25,28 @@ from proteindiff.training.losses.struct_losses.anglogram_loss import anglogram_l
 class ResNetBlockCfg:
     d_in: int = 256
     d_out: int = 256
-    kernel_size: int = 2
+    kernel_size: int = 3  # Use odd kernel size to avoid copy with padding="same"
 
 class ResNetBlock(Base):
     def __init__(self, cfg: ResNetBlockCfg):
         super().__init__()
 
+        # Use explicit padding for odd kernels: padding = kernel_size // 2
+        # This avoids the copy that padding="same" creates with even kernels
+        padding = cfg.kernel_size // 2
+
         d_in = cfg.d_in
         self.pre_conv = None
         if cfg.d_in != cfg.d_out:
             self.pre_conv = nn.Sequential(
-                nn.Conv3d(cfg.d_in, cfg.d_out, cfg.kernel_size, stride=1, padding="same", bias=False),
+                nn.Conv3d(cfg.d_in, cfg.d_out, cfg.kernel_size, stride=1, padding=padding, bias=False),
                 nn.GroupNorm(max(cfg.d_out//16, 1), cfg.d_out),
                 nn.SiLU()
             )
             d_in = cfg.d_out
 
         self.conv = nn.Sequential(
-            nn.Conv3d(d_in, cfg.d_out, cfg.kernel_size, stride=1, padding="same", bias=False),
+            nn.Conv3d(d_in, cfg.d_out, cfg.kernel_size, stride=1, padding=padding, bias=False),
             nn.GroupNorm(max(cfg.d_out//16, 1), cfg.d_out),
             nn.SiLU()
         )
@@ -160,7 +158,8 @@ class DownsampleModelCfg:
     d_in: int = 256
     d_hidden: int = 256
     d_out: int = 256
-    kernel_size: int = 2
+    resnet_kernel_size: int = 3  # Odd kernel for ResNetBlocks (preserves spatial dims)
+    downsample_kernel_size: int = 2  # kernel=stride for DownConvBlocks
     starting_dim: int = 16
     resnets_per_downconv: int = 3
 
@@ -173,10 +172,10 @@ class DownsampleModel(Base):
         num_downsamples = int(num_downsamples)
 
         blocks = []
-        first_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_in, d_out=cfg.d_hidden, kernel_size=cfg.kernel_size)
-        down_conv_block_cfg = DownConvBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.kernel_size, downsample_factor=2)
-        mid_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.kernel_size)
-        last_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_out, kernel_size=cfg.kernel_size)
+        first_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_in, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
+        down_conv_block_cfg = DownConvBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.downsample_kernel_size, downsample_factor=cfg.downsample_kernel_size)
+        mid_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
+        last_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_out, kernel_size=cfg.resnet_kernel_size)
 
         blocks.append(ResNetBlock(first_resnet_cfg))
 
@@ -198,7 +197,8 @@ class UpsampleModelCfg:
     d_in: int = 256
     d_hidden: int = 256
     d_out: int = 256
-    kernel_size: int = 2
+    resnet_kernel_size: int = 3  # Odd kernel for ResNetBlocks (preserves spatial dims)
+    upsample_kernel_size: int = 2  # kernel=stride for UpConvBlocks
     final_dim: int = 16
     resnets_per_upconv: int = 3
 
@@ -211,10 +211,10 @@ class UpsampleModel(Base):
         num_upsamples = int(num_upsamples)
 
         blocks = []
-        first_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_in, d_out=cfg.d_hidden, kernel_size=cfg.kernel_size)
-        up_conv_block_cfg = UpConvBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.kernel_size, upsample_factor=2)
-        mid_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.kernel_size)
-        last_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_out, kernel_size=cfg.kernel_size)
+        first_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_in, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
+        up_conv_block_cfg = UpConvBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.upsample_kernel_size, upsample_factor=cfg.upsample_kernel_size)
+        mid_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
+        last_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_out, kernel_size=cfg.resnet_kernel_size)
 
         blocks.append(ResNetBlock(first_resnet_cfg))
 
@@ -261,18 +261,24 @@ class SeqProjectionHead(ProjectionHead):
         )
         super().__init__(projection_cfg)
 
+def _qk_proj_default():
+    return ProjectionHeadCfg(d_in=256, d_out=64)
+
 @dataclass
 class PairwiseProjectionHeadCfg:
     d_model: int = 256
     d_down: int = 64
     num_bins: int = 64
+    num_outputs: int = 1  # multiplier for d_out = num_outputs * num_bins
+    qk_proj: ProjectionHeadCfg = field(default_factory=_qk_proj_default)
 
 class PairwiseProjectionHead(Base):
     def __init__(self, cfg: PairwiseProjectionHeadCfg):
         super().__init__()
-        self.Wqk = nn.Linear(cfg.d_model, cfg.d_down)
+        self.Wqk = ProjectionHead(cfg.qk_proj)
         self.fc1 = nn.Linear(cfg.d_down, cfg.d_down, bias=False)
-        self.fc2 = nn.Linear(cfg.d_down, cfg.num_bins, bias=False)
+        self.fc2 = nn.Linear(cfg.d_down, cfg.num_outputs * cfg.num_bins, bias=False)
+        self.num_outputs = cfg.num_outputs
 
     def forward(self, 
         loss_fn: Callable,
@@ -287,15 +293,18 @@ class PairwiseProjectionHead(Base):
         the output of this module is a size 1, tensor, representing the loss
         '''
         qk = self.Wqk(x).reshape(x.shape[0], 2, -1)
-        loss = loss_fn(qk, self.fc1.weight, self.fc2.weight, *args, **kwargs)
+        loss = loss_fn(qk, self.fc1.weight, self.fc2.weight, *args, **kwargs) / self.num_outputs # average outputs (only really does anything to anglogram_loss)
         return loss
 
+
+def _angle_proj_default():
+    return PairwiseProjectionHeadCfg(num_outputs=6)
 
 @dataclass
 class StructProjectionHeadCfg:
     d_model: int = 256
     dist_proj: PairwiseProjectionHeadCfg = field(default_factory = PairwiseProjectionHeadCfg)
-    angle_proj: PairwiseProjectionHeadCfg = field(default_factory = PairwiseProjectionHeadCfg)
+    angle_proj: PairwiseProjectionHeadCfg = field(default_factory = _angle_proj_default)
     plddt_proj: PairwiseProjectionHeadCfg = field(default_factory = PairwiseProjectionHeadCfg)
     pae_proj: PairwiseProjectionHeadCfg = field(default_factory = PairwiseProjectionHeadCfg)
 
@@ -305,18 +314,19 @@ class StructProjectionHead(Base):
         self.dist_proj = PairwiseProjectionHead(cfg.dist_proj)
         self.angle_proj = PairwiseProjectionHead(cfg.angle_proj)
         self.frame_proj = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=3*3))
-        self.torsion_proj = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=7*2))
+        self.torsion_proj = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=4*2))
         self.plddt_proj = PairwiseProjectionHead(cfg.plddt_proj)
         self.pae_proj = PairwiseProjectionHead(cfg.pae_proj)
 
     def forward(
-        self, 
-        struct_logits: Float[T, "ZN d_model"], 
-        coords: Float[T, "ZN 14 3"], 
-        coords_cb: Float[T, "ZN 3"], 
-        unit_vecs: Float[T, "ZN 3"], 
-        frames: Float[T, "ZN 3 3"], 
+        self,
+        struct_logits: Float[T, "ZN d_model"],
+        coords: Float[T, "ZN 14 3"],
+        coords_cb: Float[T, "ZN 3"],
+        unit_vecs: Float[T, "ZN 3 3"],
         cu_seqlens: Int[T, "Z+1"],
+        labels: Float[T, "ZN"],
+        atom_mask: Bool[T, "ZN 14"],
         min_dist: int,
         max_dist: int,
     )-> Tuple[
@@ -333,18 +343,19 @@ class StructProjectionHead(Base):
         distogram_loss = self.dist_proj(distogram_loss_fn, struct_logits, coords_cb, cu_seqlens, min_dist=min_dist, max_dist=max_dist)
         anglogram_loss = self.angle_proj(anglogram_loss_fn, struct_logits, unit_vecs, cu_seqlens)
 
-        # predict coordinates from logits
+        # predict coordinates from logits 
         txy = self.frame_proj(struct_logits)
         sincos = self.torsion_proj(struct_logits)
         t, x, y = torch.chunk(txy, chunks=3, dim=-1)
         sin, cos = torch.chunk(sincos, chunks=2, dim=-1)
-        # coords_pred = coords_from_txy_sincos(t, x, y, sin, cos) # TODO: implement this
+        coords_pred, _ = coords_from_txy_sincos(t, x, y, sin, cos, labels)
+
+        distance_loss = distance_loss_fn(coords_pred, coords, atom_mask, cu_seqlens)
 
         # TODO: implement these, eventual calls are commented out
         dummy_loss = struct_logits.sum()*0
-        distance_loss = dummy_loss # distance_loss_fn(coords_pred, coords, cu_seqlens)
         angle_loss = dummy_loss # angle_loss_fn(coords_pred, coords, cu_seqlens)
-        plddt_loss = dummy_loss # self.plddt_proj(plddt_loss_fn, struct_logits, coords_pred, coords, cu_seqlens)
+        plddt_loss = dummy_loss # TODO: this shouldnt be pw proj head, will make a class for PLDDT speciifcally
         pae_loss = dummy_loss # self.pae_proj(pae_loss_fn, struct_logits, coords_pred, coords, cu_seqlens)
 
         return (

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from proteindiff.model.base import Base
 from proteindiff.static.constants import amber_partial_charges, aa_2_lbl
 from proteindiff.types import Tuple, Float, Int, Bool, T
+from proteindiff.utils.struct_utils import get_backbone, compute_frames
 
 @dataclass
 class TokenizerCfg:
@@ -42,10 +43,10 @@ class Tokenizer(Base):
 		'''
 
 		# get the backbone atoms, using virtual Cb
-		C_backbone = Tokenizer.get_backbone(C) # ZN,4,3
+		C_backbone = get_backbone(C) # ZN,4,3
 
 		# compute unit vectors for each residue's local reference frame
-		local_origins, local_frames = self.compute_frames(C_backbone) # ZN,3 and ZN,3,3
+		local_origins, local_frames = compute_frames(C_backbone) # ZN,3 and ZN,3,3
 
 		# create the voxel for each residue by rotating the base voxel to the local frame and translating to local origin, 
 		# simply contains the coordinates for the voxels
@@ -58,50 +59,6 @@ class Tokenizer(Base):
 		divergence = self.compute_divergence(fields) # ZN,1,Vx,Vy,Vz
 
 		return C_backbone, divergence, local_frames
-
-	@staticmethod
-	@torch.no_grad()
-	def get_backbone(C: Float[T, "ZN 14 3"]) -> Float[T, "ZN 4 3"]:
-
-		n = C[:, 0, :]
-		ca = C[:, 1, :]
-		c = C[:, 2, :]
-
-		b1 = ca - n
-		b2 = c - ca
-		b3 = torch.linalg.cross(b1, b2, dim=-1)
-
-		cb = ca - 0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
-
-		C_backbone = torch.stack([n, ca, c, cb], dim=1)
-
-		return C_backbone
-
-	def _norm(self, vec: Float[T, "..."]) -> Float[T, "..."]:
-		return F.normalize(vec, p=2, dim=-1, eps=1e-8)
-
-	@torch.no_grad()
-	def compute_frames(self, C_backbone: Float[T, "ZN 4 3"]) -> Tuple[Float[T, "ZN 3"], Float[T, "ZN 3 3"]]:
-
-		# split the backbone atoms
-		n, ca, c, cb = torch.chunk(C_backbone, dim=1, chunks=4)
-
-		# compute y
-		y = self._norm(cb-ca)
-
-		# x is c-n projected onto the plane normal to y
-		x = self._norm(c-n - y*torch.linalg.vecdot(c-n, y, dim=-1).unsqueeze(-1))
-
-		# z is cross product of the two
-		z = self._norm(torch.linalg.cross(x, y, dim=-1))
-
-		# get the frames
-		frames = torch.cat([x,y,z], dim=1) # ZN,U,S
-
-		# the origin is the beta carbon position
-		origin = cb.squeeze(1) # ZN, S
-
-		return origin, frames
 
 	@torch.no_grad()
 	def compute_voxels(
