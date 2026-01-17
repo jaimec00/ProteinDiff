@@ -5,12 +5,14 @@ import torch
 from proteindiff.types import Float, Int, Bool, T, Tuple
 
 
-@triton.autotune(configs=[
+@triton.autotune(
+    configs=[
         triton.Config(kwargs={"BLOCK_Z": z}, num_warps=w)
         for z in [32, 64, 128]
         for w in [4, 8, 16]
     ],
-    key=["K"]
+    key=["K"],
+    restore_value=["nbrs_ptr"],
 )
 @triton.jit
 def get_neighbors_kernel(
