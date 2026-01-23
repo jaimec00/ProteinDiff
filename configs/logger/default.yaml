@@ -1,6 +1,5 @@
 _target_: proteindiff.training.logger.LoggerCfg
 
-out_path: /home/jaime/Desktop/scratch/experiments
 experiment_name: debug
 overwrite: true
 log_system_metrics: true

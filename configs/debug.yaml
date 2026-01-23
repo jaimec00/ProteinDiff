@@ -1,10 +1,11 @@
 defaults:
-  - /model: simple
+  - /model: default
   - /data: default
   - /logger: default
-  - /losses: vae
-  - /optim: adam
-  - /scheduler: static
+  - /losses: default
+  - /optim: default
+  - /scheduler: default
+  - /profiler: default
   - hydra
   - _self_
 
@@ -12,7 +13,10 @@ _target_: proteindiff.training.train.training_run.TrainingRunCfg
 
 # training params
 train_stage: vae
-epochs: 100
-accumulation_steps: 1
+max_steps: 5000
+val_interval: 1000
+accumulation_steps: 8
 grad_clip_norm: 5.0
-compile_model: false
+compile_model: true
+load_from_checkpoint: ""
+checkpoint_interval: 500
