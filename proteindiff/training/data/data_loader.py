@@ -58,8 +58,6 @@ class DataHolder:
 		pdb_path = data_path / "pdb"
 		train_info, val_info, test_info = self._get_splits(data_path, config.max_resolution)
 
-		# to increment the epoch
-		self._epoch = shared_val("I", 0) # uint32
 
 		def init_loader(df: pd.DataFrame, samples: int=-1) -> DataLoader:
 			'''helper to init a different loader for train val and test'''
@@ -75,7 +73,6 @@ class DataHolder:
 				asymmetric_units_only=config.asymmetric_units_only,
 				buffer_size=config.buffer_size,
 				seed=config.rng_seed,
-				epoch=self._epoch
 			))
 
 			loader = DataLoader(data, batch_size=None, num_workers=config.num_workers, collate_fn=lambda x: x,
@@ -109,14 +106,14 @@ class DataHolder:
 
 		return train_info, val_info, test_info
 
-	def increment_epoch(self) -> None:
-		with self._epoch.get_lock():
-			self._epoch.value += 1
-
 class Data(IterableDataset):
 	def __init__(self, config: DataCfg) -> None:
 
 		super().__init__()
+
+		# store epoch reference for incrementing after each full pass
+		# to increment the epoch
+		self._epoch = shared_val("I", 0) # uint32
 
 		# keep a cache of pdbs
 		self._pdb_cache = PDBCache(PDBCacheCfg(
@@ -131,7 +128,7 @@ class Data(IterableDataset):
 		self._sampler = Sampler(config.clusters_df, SamplerCfg(
 			num_clusters=config.num_clusters,
 			seed=config.seed
-		), config.epoch)
+		), self._epoch)
 
 		# for batch building
 		self._batch_builder_config = BatchBuilderCfg(
@@ -164,10 +161,16 @@ class Data(IterableDataset):
 		for _, row in sampled_rows.iterrows():
 
 			# add the sample, only yields if batch is ready
-			yield from batch_builder.add_sample(self._get_asmb(row))
+			sample = self._get_asmb(row)
+			if sample:
+				yield from batch_builder.add_sample(sample)
 
 		# drain the buffer and yield last batches
 		yield from batch_builder.drain_buffer()
+
+		# increment epoch for next iteration (different sampling)
+		with self._epoch.get_lock():
+			self._epoch.value += 1
 
 	def __len__(self) -> int:
 		return len(self._sampler)

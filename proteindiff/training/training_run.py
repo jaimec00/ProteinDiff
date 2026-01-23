@@ -16,6 +16,7 @@ from hydra.utils import instantiate
 from dataclasses import dataclass, field
 from omegaconf import OmegaConf as om, DictConfig
 import time
+from pathlib import Path
 
 from proteindiff.model import ProteinDiff
 from proteindiff.model.ProteinDiff import ProteinDiffCfg
@@ -25,13 +26,14 @@ from proteindiff.training.losses.training_loss import TrainingRunLosses, Trainin
 from proteindiff.training.optim import OptimCfg, setup_optim
 from proteindiff.training.scheduler import SchedulerCfg, setup_scheduler
 from proteindiff.static.constants import TrainingStage
+from proteindiff.utils.profiling import ProfilerCfg, Profiler
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-# detect anomolies in training and allow tf32 matmuls (TODO: reconsider tf32?)
-torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+# detect anomolies in training and dont tf32 matmuls 
+# torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 @dataclass
 class TrainingRunCfg:
@@ -41,13 +43,16 @@ class TrainingRunCfg:
 	losses: TrainingRunLossesCfg
 	optim: OptimCfg
 	scheduler: SchedulerCfg
+	profiler: ProfilerCfg
 
-	train_stage: TrainingStage
-	epochs: int = 10 # TODO: change to steps
+	train_stage: TrainingStage = TrainingStage.VAE
+	max_steps: int = 100_000        # Stop after this many steps
+	val_interval: int = 1_000       # Run validation every N steps
 	accumulation_steps: int = 1
 	grad_clip_norm: float = 5.0
 	compile_model: bool = True
-	#TODO: add other stuff relevant to train (keep simple for now)
+	load_from_checkpoint: str = ""
+	checkpoint_interval: int = 1_000
 
 class TrainingRun:
 
@@ -59,17 +64,19 @@ class TrainingRun:
 		self.data = DataHolder(cfg.data)
 		self.losses = TrainingRunLosses(cfg.losses)
 		self.logger = Logger(cfg.logger)
-		self.model = ProteinDiff(cfg.model).to(self.gpu)
-		self.optim = setup_optim(cfg.optim, self.model)
-		self.scheduler = setup_scheduler(cfg.scheduler, self.optim)
+		self.profiler = Profiler(cfg.profiler, self.logger.out_path)
 
 		self.train_stage = cfg.train_stage
-		self.epochs = cfg.epochs
+		self.max_steps = cfg.max_steps
+		self.val_interval = cfg.val_interval
 		self.accumulation_steps = cfg.accumulation_steps
 		self.grad_clip_norm = cfg.grad_clip_norm
-		self.cfg = cfg
+		self.batch_counter = 0
+		
+		self.model, self.optim, self.scheduler, cfg = self.maybe_load_checkpoint(cfg)
+		self.checkpoint_interval = cfg.checkpoint_interval
 
-		self.log(f"configuration:\n\n{om.to_yaml(self.cfg)}", fancy=True)
+		self.log(f"configuration:\n\n{om.to_yaml(cfg)}", fancy=True)
 		num_params = sum(p.numel() for p in self.model.parameters())
 		self.log(f"model initialized with {num_params:,} parameters", fancy=True)
 
@@ -77,67 +84,141 @@ class TrainingRun:
 			self.log("compiling model...")
 			self.model = torch.compile(self.model, dynamic=True)
 
-
 		with mlflow.start_run():
 			self.last_ts = time.perf_counter()
 			self.train()
 			self.test()
 			self.log("fin", fancy=True)
 
+	def maybe_load_checkpoint(self, cfg: TrainingRunCfg):
+
+		if cfg.load_from_checkpoint:
+
+			weights_path = Path(cfg.load_from_checkpoint)
+
+			checkpoint_path = weights_path.parent
+			
+			# TODO warn user if the configs mismatch
+			cfg.model = om.load(checkpoint_path / "model_cfg.yaml")
+			cfg.optim = om.load(checkpoint_path / "optim_cfg.yaml")
+			cfg.scheduler = om.load(checkpoint_path / "scheduler_cfg.yaml")
+		
+			weights = torch.load(str(weights_path), map_location=self.cpu, weights_only=True)
+
+			# TODO: add _target_ to model cfg (was built from model factory, so it is missing)
+
+			model = ProteinDiff(cfg.model)
+			model.load_state_dict(weights["model"], strict=False)
+			optim = setup_optim(cfg.optim, model)
+			optim.load_state_dict(weights["optim"])
+			scheduler = setup_scheduler(cfg.scheduler, optim)
+			scheduler.load_state_dict(weights["scheduler"])
+
+			# TODO: handle step, epoch and other training state stuff (along with dataloader being in sync with this)
+
+		else:
+			model = ProteinDiff(cfg.model)
+			optim = setup_optim(cfg.optim, model)
+			scheduler = setup_scheduler(cfg.scheduler, optim)
+
+		# move to gpu
+		model = model.to(self.gpu)
+		for state in optim.state.values():
+			for k, v in state.items():
+				if torch.is_tensor(v):
+					state[k] = v.to(self.gpu)
+
+		# TODO: add _target_ to the model
+
+		# save the fully built model 
+		om.save(cfg.model, self.logger.out_path / "model_cfg.yaml")
+		om.save(cfg.optim, self.logger.out_path / "optim_cfg.yaml")
+		om.save(cfg.scheduler, self.logger.out_path / "scheduler_cfg.yaml")
+		
+		return model, optim, scheduler, cfg
+
+	def maybe_save_checkpoint(self):
+		if (
+			not self.learn_step
+			or self.last_step % self.checkpoint_interval != 0 
+			or self.last_step==0
+		):
+			return
+		
+		weights = {
+			"model": self.model.state_dict(),
+			"optim": self.optim.state_dict(),
+			"scheduler": self.scheduler.state_dict(),
+		}
+
+		checkpoint_path = str(self.logger.out_path / f"checkpoint_step-{self.last_step:,}.pt")
+		self.log(f"saved checkpoint to {checkpoint_path}")
+		torch.save(weights, checkpoint_path)
+
+	def set_training(self):
+		self.model.train()
+		self.losses.clear_tmp_losses()
+
+	def run_val(self):
+		return (
+			self.last_step % self.val_interval == 0 
+			and self.last_step > 0
+			and self.learn_step
+		)
+
+	def get_batch(self, train_iter):
+		try:
+			return next(train_iter), train_iter
+		except StopIteration:
+			train_iter = iter(self.data.train)
+			return next(train_iter), train_iter
 
 	def train(self):
 
-		self.log(
-			f"\n\ninitializing training. "
-			f"training on approximately {len(self.data.train)} clusters "
-			f"for {self.epochs} epochs.\n" 
-		)
-		
-		# loop through epochs
-		for epoch_idx in range(self.epochs):
+		self.log(f"initializing training for {self.max_steps} steps...")
 
-			# TODO: mae a helper to only set non-frozen models to train
-			# make sure in training mode
-			self.model.train()
+		self.set_training()
+		train_iter = iter(self.data.train)
 
-			# log some info
-			self.logger.log_epoch(epoch_idx, self.last_step, self.last_lr)
+		with self.profiler as profiler:
+			with self.create_pbar(self.max_steps, "training progress") as pbar:
+				while self.last_step < self.max_steps:
 
-			# clear temp losses
-			self.losses.clear_tmp_losses()
+					# next batch
+					data_batch, train_iter = self.get_batch(train_iter)
 
-			epoch_pbar = self._create_pbar(len(self.data.train), "training progress")
+					# learn 
+					self.batch_learn(data_batch)
 
-			# loop through batches
-			for b_idx, data_batch in enumerate(self.data.train):
+					# update progress bar
+					if self.learn_step:
+						
+						# update progress
+						self.update_pbar(pbar, data_batch)
 
-				# learn
-				self.batch_learn(data_batch, b_idx)
+						# log step metrics
+						self.log_step(self.losses.tmp, data_batch)
 
-				# update pbar
-				self._update_pbar(epoch_pbar, data_batch, b_idx)
+					# profiler step
+					profiler.step()
 
-				# log the step
-				self.log_step(self.losses.tmp, data_batch)
+					# save the checkpoint
+					self.maybe_save_checkpoint()
 
-			# log epoch losses and save avg 
-			epoch_losses = self.losses.tmp.get_avg()
-			self.logger.log_losses(epoch_losses, mode="train")
-			self.losses.train.add_losses(epoch_losses)
+					# validation at intervals
+					if self.run_val():
+						self.log(f"step: {self.last_step}\nlr: {self.last_lr}", fancy=True)
+						losses = self.losses.tmp.get_avg()
+						self.logger.log_losses(losses)
+						self.losses.train.add_losses(losses)
+						self.validation()
+						self.set_training()
 
-			# run validation
-			self.validation()
-			
-		# announce trainnig is done
-		self.log(f"training finished after {epoch_idx} epochs", fancy=True)
-
-		# plot training losses
-		self.logger.plot_training(self.losses)
-
+		self.log(f"training finished after {self.last_step} steps", fancy=True)
 
 	@torch.no_grad()
 	def validation(self):
-		
+
 		# switch to evaluation mode to perform validation
 		self.model.eval()
 
@@ -145,15 +226,18 @@ class TrainingRun:
 		self.losses.clear_tmp_losses()
 
 		# progress bar
-		val_pbar = self._create_pbar(len(self.data.val), "validation progress")
+		val_pbar = self.create_pbar(len(self.data.val), "validation progress")
 
-		# loop through validation batches
-		for b_idx, data_batch in enumerate(self.data.val):
+		with self.create_pbar(len(self.data.val), "validation progress") as pbar:
 
-			# run the model
-			self.batch_forward(data_batch)
+			# loop through validation batches
+			for data_batch in self.data.val:
 
-			self._update_pbar(val_pbar, data_batch, b_idx)		
+				# run the model
+				self.batch_forward(data_batch)
+
+				# update progress bar
+				self.update_pbar(pbar, data_batch, step=data_batch.samples)
 
 		# log the losses
 		val_losses = self.losses.tmp.get_avg()
@@ -168,27 +252,29 @@ class TrainingRun:
 
 		# log
 		self.log("starting testing", fancy=True)
-		
-		# progress bar
-		test_pbar = self._create_pbar(len(self.data.test), "test progress")
 
-		# loop through testing batches
-		for b_idx, data_batch in enumerate(self.data.test):
+		# clear losses for this run
+		self.losses.clear_tmp_losses()
 
-			# run the model
-			self.batch_forward(data_batch)
+		with self.create_pbar(len(self.data.test), "test progress") as pbar:
 
-			# update pbar
-			self._update_pbar(test_pbar, data_batch, b_idx)
-		
+			# loop through testing batches
+			for data_batch in self.data.test:
+
+				# run the model
+				self.batch_forward(data_batch)
+
+				# update pbar
+				self.update_pbar(pbar, data_batch, step=data_batch.samples)
+
 		# log the losses
 		test_losses = self.losses.tmp.get_avg()
 		self.logger.log_losses(test_losses, mode="test")
 		self.losses.test.extend_losses(self.losses.tmp)
 
-	def batch_learn(self, data_batch, b_idx):
+	def batch_learn(self, data_batch):
 		self.batch_forward(data_batch)
-		self.batch_backward(data_batch, b_idx)
+		self.batch_backward(data_batch)
 
 	def batch_forward(self, data_batch):
 		
@@ -239,14 +325,13 @@ class TrainingRun:
 		# add the losses to the temporary losses
 		self.losses.tmp.add_losses(losses, valid_toks=len(data_batch))
 
-	def batch_backward(self, data_batch, b_idx):
+	def batch_backward(self, data_batch):
 
-		loss = self.losses.tmp.get_last_loss() 
+		loss = self.losses.tmp.get_last_loss()
 		loss.backward()
 
-		learn_step = (b_idx + 1) % self.accumulation_steps == 0
-		if learn_step:
-		
+		if self.learn_step:
+
 			# grad clip
 			if self.grad_clip_norm:
 				torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
@@ -255,8 +340,15 @@ class TrainingRun:
 			self.optim.step()
 			self.scheduler.step()
 			self.optim.zero_grad()
+		self.batch_counter += 1
 
 	def log_step(self, losses, data_batch):
+		'''
+		lots of approximations here
+		- sample from the last accum step only (first rank only when do distributed)
+		- samples / toks is counted from current step and mult by accum steps (and dp world_size when do dist)
+		not meant to be extensive, just a decent enough approximation for monitoring
+		'''
 		
 		# get delta time or update last time
 		cur_ts = time.perf_counter()
@@ -267,8 +359,8 @@ class TrainingRun:
 
 		# create the metrics
 		losses_dict = losses.get_last_losses(scale=1/len(data_batch))
-		data_dict = {"toks_per_batch": len(data_batch), "samples_per_batch": data_batch.seqlens.size(0)}
-		throughput_dict = {"toks_per_sec": len(data_batch) / delta_ts, "updates_per_sec": 1 / delta_ts}
+		data_dict = {"toks_per_batch": len(data_batch)*self.accumulation_steps, "samples_per_batch": data_batch.samples*self.accumulation_steps}
+		throughput_dict = {"toks_per_sec": len(data_batch)*self.accumulation_steps / delta_ts, "updates_per_sec": 1 / delta_ts}
 
 		# format
 		losses_dict = {f"train/loss/{k}": v for k, v in losses_dict.items()}
@@ -277,7 +369,7 @@ class TrainingRun:
 		scheduler_dict = {f"train/lr": self.last_lr}
 		
 		# combine
-		step_dict = losses_dict | data_dict | scheduler_dict| throughput_dict
+		step_dict = losses_dict | data_dict | scheduler_dict | throughput_dict
 
 		self.logger.log_step(step_dict, self.last_step)
 
@@ -290,15 +382,15 @@ class TrainingRun:
 			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
 		self.logger.log.info(message)
 
-	def _create_pbar(self, total: int, desc: str) -> tqdm:
+	def create_pbar(self, total: int, desc: str) -> tqdm:
 		"""Create a progress bar for training/validation/test loops."""
-		return tqdm(total=total, desc=desc, unit="samples")
+		return tqdm(total=total, desc=desc, unit="steps")
 
-	def _update_pbar(self, pbar: tqdm, data_batch, b_idx: int):
-		"""Update progress bar with loss and advance by batch samples."""
-		if b_idx % 10 == 0:
+	def update_pbar(self, pbar: tqdm, data_batch, step=1):
+		"""Update progress bar with loss and advance by 1 step."""
+		if self.last_step % 10 == 0:
 			pbar.set_postfix(loss=self.losses.tmp.get_last_loss().item() / len(data_batch))
-		pbar.update(data_batch.samples)
+		pbar.update(step)
 
 	@property
 	def last_lr(self):
@@ -308,6 +400,12 @@ class TrainingRun:
 	def last_step(self):
 		'''just for clearer naming'''
 		return int(self.scheduler.last_epoch)
+
+	@property
+	def learn_step(self):
+		return (self.batch_counter + 1) % self.accumulation_steps == 0
+
+
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="debug")
 def main(cfg: DictConfig):

@@ -172,8 +172,9 @@ def distogram_loss_fwd_bwd(
         loss_contrib = -log_prob_target
 
         # === backward ===
-        # d_out_logits = probs - one_hot(bin_idx)
-        d_out_logits = probs - tl.where(offs_o == bin_idx, 1.0, 0.0)
+        
+        # d_out_logits = (probs - one_hot(bin_idx))
+        d_out_logits = (probs - tl.where(offs_o == bin_idx, 1.0, 0.0))
         d_out_logits_masked = tl.where(o_mask, d_out_logits, 0.0)
 
         # grad_h = fc2.T @ d_out_logits using tl.dot with transpose

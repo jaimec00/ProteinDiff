@@ -137,7 +137,7 @@ class BatchBuilder:
 		return len(self._buffer)>=self._buffer_size
 
 	def _batch_full(self) -> bool:
-		return self._cur_tokens+(len(self._buffer[-1]) if self._buffer else 0)>=self._batch_tokens and self._cur_tokens > 0
+		return (self._cur_tokens+(len(self._buffer[-1]) if self._buffer else 0)>=self._batch_tokens) and self._cur_tokens > 0
 
 
 class DataBatch:
@@ -236,7 +236,7 @@ class DataBatch:
 
 	@property
 	def samples(self):
-		return self.cu_seqlens.size(0)-1
+		return self.seqlens.size(0)
 
 	def __len__(self):
 		return self.labels.size(0)
@@ -289,7 +289,10 @@ class PDBData:
 		asmb_id = random.choice(self._get_chain(chain)["asmb_ids"])
 
 		# get the other chains in this assembly
-		asmb_chains = self._metadata["asmb_chains"][asmb_id].split(",")
+		if asmb_id == -1: # -1 means just itself
+			asmb_chains = [chain]
+		else:
+			asmb_chains = self._metadata["asmb_chains"][asmb_id].split(",")
 
 		# shuffle the asmb chains to vary their order, only matters when we need to crop
 		# make sure the target chain is always first though, since we would rather not crop that one
@@ -325,7 +328,12 @@ class PDBData:
 		homo_chains = np.arange(len(self._metadata["chains"]))[self._metadata["tm"][trgt_chain_idx, :, 1]>=self._homo_thresh]
 
 		# get the corresponding xform
-		asmb_xform = np.expand_dims(np.eye(4), 0) if self._asymmetric_units_only else self._metadata[f"asmb_xform{asmb_id}"]
+		asmb_xform = (
+			np.expand_dims(np.eye(4), 0) 
+			if self._asymmetric_units_only 
+			or asmb_id == -1 
+			else self._metadata[f"asmb_xform{asmb_id}"]
+		)
 
 		# init the assembly, also applies the xform and takes care of cropping based on max size
 		asmb = Assembly(coords, labels, atom_mask,
@@ -369,6 +377,9 @@ class PDBData:
 		for asmb_id, asmb in enumerate(self._metadata["asmb_chains"]):
 			if chain in asmb.split(","):
 				chain_data["asmb_ids"].append(asmb_id)
+		
+		if not chain_data["asmb_ids"]:
+			chain_data["asmb_ids"] = [-1] # signifies the only chain is itself
 
 		# add to the cache
 		self._chain_cache[chain] = chain_data
@@ -431,6 +442,7 @@ class Assembly:
 		self.trgt_mask = self.trgt_mask.repeat(num_copies)
 		self.homo_mask = self.homo_mask.repeat(num_copies)
 		
+	@torch.no_grad()
 	def _crop(self, max_seq_size: int) -> None:
 
 		# check how many copies you can make based on max size param. 

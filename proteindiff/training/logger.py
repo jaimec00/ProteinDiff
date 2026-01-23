@@ -25,7 +25,6 @@ import mlflow
 
 @dataclass
 class LoggerCfg:
-	out_path: str = ""
 	experiment_name: str = "debug"
 	overwrite: bool = False
 	log_system_metrics: bool = True
@@ -49,18 +48,6 @@ class Logger():
 			mlflow.disable_system_metrics_logging()
 		
 		mlflow.set_experiment(cfg.experiment_name)
-
-	def log_epoch(self, epoch, step, current_lr):
-
-		self.log.info(textwrap.dedent(f'''
-		
-			{'-'*80}
-			Epoch {epoch}, Step {step:,}: 
-			{'-'*80}
-			
-			Current Learning Rate: {current_lr}
-		''')
-		)
 
 	def log_losses(self, losses_dict, mode="train"):
 
