@@ -100,8 +100,8 @@ After completing your review, recommend the appropriate next steps using other a
 
 ## Project-Specific Notes
 
-For this ProteinDiff project:
+For this Proteus project:
 - Check that new code follows patterns in CLAUDE.md
-- Verify tensor operations use proper jaxtyping annotations from `proteindiff/types/`
+- Verify tensor operations use proper jaxtyping annotations from `proteus/types/`
 - Ensure CUDA-dependent code has appropriate fallbacks or documentation
 - Check that config changes align with the Hydra config structure in `configs/`

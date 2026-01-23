@@ -1,10 +1,10 @@
-"""Unit tests for proteindiff/utils/struct_utils.py - coordinate reconstruction functions."""
+"""Unit tests for proteus/utils/struct_utils.py - coordinate reconstruction functions."""
 
 import pytest
 import torch
 import math
 
-from proteindiff.utils.struct_utils import (
+from proteus.utils.struct_utils import (
     gram_schmidt,
     normalize_torsions,
     torsion_to_frames,

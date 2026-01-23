@@ -123,7 +123,7 @@ After analyzing test results, recommend the appropriate next steps using other a
 
 ## Project-Specific Notes
 
-For this ProteinDiff project:
+For this Proteus project:
 - Run tests with: `pixi run pytest tests/` (or `pytest tests/` if already in pixi shell)
 - Some tests require CUDA (anglogram, distogram losses)
 - Test structure mirrors source: `tests/test_losses/`, `tests/test_model/`, etc.

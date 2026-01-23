@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from proteindiff.training.losses.struct_losses.distance_loss import (
+from proteus.training.losses.struct_losses.distance_loss import (
     distance_loss,
     DistanceLoss,
 )

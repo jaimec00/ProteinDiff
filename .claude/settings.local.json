@@ -13,7 +13,10 @@
       "Bash(git log:*)",
       "Bash(find:*)",
       "Bash(python -c:*)",
-      "Bash(xargs ls:*)"
+      "Bash(xargs ls:*)",
+      "Bash(for file in ./proteus/**/*.py ./tests/**/*.py)",
+      "Bash(do sed -i 's/proteindiff/proteus/g' \"$file\")",
+      "Bash(done)"
     ]
   }
 }

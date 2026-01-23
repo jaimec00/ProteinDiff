@@ -102,8 +102,8 @@ After exploration, recommend the appropriate next steps using other available ag
 
 ## Project-Specific Notes
 
-For this ProteinDiff project:
-- Key directories: `proteindiff/model/` (architecture), `proteindiff/training/` (training loop), `configs/` (Hydra configs)
-- Type annotations in `proteindiff/types/__init__.py` define tensor shape conventions
+For this Proteus project:
+- Key directories: `proteus/model/` (architecture), `proteus/training/` (training loop), `configs/` (Hydra configs)
+- Type annotations in `proteus/types/__init__.py` define tensor shape conventions
 - Tests in `tests/` mirror the source structure
-- Custom Triton kernels used for anglogram loss - check `proteindiff/training/losses/struct_losses/`
+- Custom Triton kernels used for anglogram loss - check `proteus/training/losses/struct_losses/`

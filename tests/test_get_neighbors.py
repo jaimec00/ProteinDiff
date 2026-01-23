@@ -5,7 +5,7 @@ import os
 
 # add parent dir to path to avoid triggering full package import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from proteindiff.model.mpnn.get_neighbors import get_neighbors
+from proteus.model.mpnn.get_neighbors import get_neighbors
 
 
 def get_neighbors_ref(

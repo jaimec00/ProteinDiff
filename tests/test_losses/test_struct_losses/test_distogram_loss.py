@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from proteindiff.training.losses.struct_losses.distogram_loss import (
+from proteus.training.losses.struct_losses.distogram_loss import (
     distogram_loss,
     DistogramLoss,
 )

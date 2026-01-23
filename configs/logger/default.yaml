@@ -1,4 +1,4 @@
-_target_: proteindiff.training.logger.LoggerCfg
+_target_: proteus.training.logger.LoggerCfg
 
 experiment_name: debug
 overwrite: true

@@ -1,5 +1,5 @@
 # profiler config
-_target_: proteindiff.utils.profiling.ProfilerCfg
+_target_: proteus.utils.profiling.ProfilerCfg
 enable: false
 wait: 1
 warmup: 1

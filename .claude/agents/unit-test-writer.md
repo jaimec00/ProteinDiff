@@ -99,10 +99,10 @@ After writing tests, recommend the appropriate next steps:
 
 ## Project-Specific Notes
 
-For this ProteinDiff project:
-- Tests go in `tests/` directory, mirroring source structure (e.g., `tests/test_losses/` for `proteindiff/training/losses/`)
+For this Proteus project:
+- Tests go in `tests/` directory, mirroring source structure (e.g., `tests/test_losses/` for `proteus/training/losses/`)
 - Use pytest as the testing framework
 - For tensor operations, create small test tensors with known values
 - GPU-dependent tests should be marked or documented (some tests require CUDA)
-- Use jaxtyping annotations consistent with `proteindiff/types/` for test fixtures
+- Use jaxtyping annotations consistent with `proteus/types/` for test fixtures
 - Mock external dependencies like MLflow for training tests

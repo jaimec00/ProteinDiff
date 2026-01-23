@@ -1,4 +1,4 @@
-_target_: proteindiff.training.optim.OptimCfg
+_target_: proteus.training.optim.OptimCfg
 
 beta1: 0.9
 beta2: 0.999

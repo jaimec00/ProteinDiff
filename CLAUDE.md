@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ProteinDiff is a multimodal protein generative model that generates proteins conditioned on partial sequence and/or structure. Uses a VAE with per-residue latents followed by latent diffusion.
+Proteus is a multimodal protein generative model that generates proteins conditioned on partial sequence and/or structure. Uses a VAE with per-residue latents followed by latent diffusion.
 
 **Status**: Architecture design phase (early development)
 
@@ -25,7 +25,7 @@ Environment variables set automatically via pixi:
 ## Running Training
 
 ```bash
-python -m proteindiff.training.training_run
+python -m proteus.training.training_run
 ```
 
 Uses Hydra config system with `configs/debug.yaml` as default entry point. Key config structure:
@@ -34,7 +34,7 @@ Uses Hydra config system with `configs/debug.yaml` as default entry point. Key c
 - `configs/losses/vae.yaml` - Loss weights and parameters
 - `configs/optim/adam.yaml`, `configs/scheduler/static.yaml` - Optimizer settings
 
-Override configs via Hydra CLI: `python -m proteindiff.training.training_run model.d_model=512`
+Override configs via Hydra CLI: `python -m proteus.training.training_run model.d_model=512`
 
 ## Running Tests
 
@@ -52,7 +52,7 @@ Note: Some tests (anglogram, distogram) require CUDA.
 1. **VAE Stage**: Train VAE end-to-end (reconstruction + KL divergence)
 2. **Diffusion Stage**: Freeze VAE, train conditioning network + diffusion model (not yet implemented)
 
-### Model Pipeline (`proteindiff/model/`)
+### Model Pipeline (`proteus/model/`)
 
 **Tokenizer** (`tokenizer/tokenizer.py`): Converts atomic coords to voxelized electric field divergence representation. Outputs backbone coords, divergence field, and local frames.
 
@@ -76,13 +76,13 @@ Latent → Up Projection → Transformer → Multi-task Heads
 
 **Diffusion** (`diffusion/diffusion.py`): DiT-style architecture (planned)
 
-### Training Pipeline (`proteindiff/training/`)
+### Training Pipeline (`proteus/training/`)
 - **Data loading** (`data/data_loader.py`): Token-based dynamic batching from ProteinMPNN dataset (pdb_2021aug02)
 - **Losses** (`losses/training_loss.py`): Weighted combination of KL, reconstruction, sequence, and structure losses
 - **Logging** (`logger.py`): MLflow integration for experiment tracking
 
 ### Key Types
-`proteindiff/types/__init__.py` defines jaxtyping annotations used throughout:
+`proteus/types/__init__.py` defines jaxtyping annotations used throughout:
 - `Float`, `Int`, `Bool` tensor types with shape annotations
 - Tensor shapes use conventions: `ZN` = total residues in batch, `Z` = number of samples
 

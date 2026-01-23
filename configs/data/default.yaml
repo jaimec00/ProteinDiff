@@ -1,4 +1,4 @@
-_target_: proteindiff.training.data.data_loader.DataHolderCfg
+_target_: proteus.training.data.data_loader.DataHolderCfg
 
 data_path: /home/ubuntu/proteinDiffVirgina/data/pdb_2021aug02
 num_train: -1

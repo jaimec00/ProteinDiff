@@ -1,4 +1,4 @@
-# ProteinDiff
+# Proteus
 
 A multimodal protein generative model that generates proteins conditioned on partial sequence and/or structure. Uses a VAE with per-residue latents followed by latent diffusion.
 

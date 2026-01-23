@@ -1,5 +1,5 @@
 [workspace]
-name = "ProteinDiff"
+name = "Proteus"
 version = "0.0.1"
 description = "Multimodal protein generative model"
 channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
@@ -32,7 +32,7 @@ pytest = "*"
 
 [pypi-dependencies]
 jaxtyping = "*"
-proteindiff = { path = ".", editable = true }
+proteus = { path = ".", editable = true }
 mlflow = "*"
 psutil = "*"
 

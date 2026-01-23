@@ -9,7 +9,7 @@ defaults:
   - hydra
   - _self_
 
-_target_: proteindiff.training.train.training_run.TrainingRunCfg
+_target_: proteus.training.train.training_run.TrainingRunCfg
 
 # training params
 train_stage: vae

@@ -1,6 +1,6 @@
 # VAE Evaluation Configuration
 
-_target_: proteindiff.eval.eval_vae.EvalVAECfg
+_target_: proteus.eval.eval_vae.EvalVAECfg
 
 # Checkpoint path (required - set via CLI)
 checkpoint_path: "/home/ubuntu/proteinDiffVirgina/experiments/run/2026-01-19/07-43-05/checkpoint_step-4,000.pt"
@@ -13,7 +13,7 @@ num_samples: 10
 
 # Data configuration
 data:
-  _target_: proteindiff.training.data.data_loader.DataHolderCfg
+  _target_: proteus.training.data.data_loader.DataHolderCfg
 
   data_path: /home/ubuntu/proteinDiffVirgina/data/pdb_2021aug02
 
