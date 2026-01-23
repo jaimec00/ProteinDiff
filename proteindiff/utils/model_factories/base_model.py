@@ -57,8 +57,6 @@ def build_decoder_cfg(d_model: int, d_latent: int, voxel_dim: int, n_transformer
 
 def build_downsample_cfg(d_model: int, voxel_dim: int):
     return DownsampleModelCfg(
-        d_in=1,
-        d_hidden=d_model,
         d_out=d_model,
         starting_dim=voxel_dim,
         resnets_per_downconv=3,
@@ -67,8 +65,6 @@ def build_downsample_cfg(d_model: int, voxel_dim: int):
 def build_upsample_cfg(d_model: int, voxel_dim: int):
     return UpsampleModelCfg(
         d_in=d_model,
-        d_hidden=d_model*2,
-        d_out=1,
         final_dim=voxel_dim,
         resnets_per_upconv=3,
     )

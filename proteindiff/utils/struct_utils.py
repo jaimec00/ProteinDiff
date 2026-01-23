@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 
 from proteindiff.types import Tuple, Float, Int, Bool, T
-from proteindiff.static import residue_constants as rc
 
 
 def normalize_vec(vec: Float[T, "..."]) -> Float[T, "..."]:
@@ -65,20 +64,6 @@ def get_bb_vecs(C: Float[T, "ZN 14 3"]) -> Tuple[Float[T, "ZN 3"], Float[T, "ZN 
     unit_vecs = torch.stack([CaN, CaCb, CaC], dim=1)  # (ZN, 3, 3)
 
     return cb, unit_vecs
-
-
-# --- Lazy-loaded torch tensors from AF2 constants ---
-_CACHED_TENSORS: dict = {}
-
-
-def _get_af2_tensor(name: str, device: torch.device, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    """Lazily load and cache AF2 constant tensors."""
-    key = (name, device, dtype)
-    if key not in _CACHED_TENSORS:
-        np_array = getattr(rc, name)
-        tensor = torch.tensor(np_array, device=device, dtype=dtype)
-        _CACHED_TENSORS[key] = tensor
-    return _CACHED_TENSORS[key]
 
 
 # --- Helper functions for coordinate reconstruction ---
@@ -331,6 +316,11 @@ def coords_from_txy_sincos(
     sin: Float[T, "ZN 4"],
     cos: Float[T, "ZN 4"],
     labels: Int[T, "ZN"],
+    restype_rigid_group_default_frame: Float[T, "21 8 4 4"],
+    restype_atom14_rigid_group_positions: Float[T, "21 14 3"],
+    restype_atom14_to_rigid_group: Int[T, "21 14"],
+    restype_atom14_mask: Float[T, "21 14"],
+    chi_angles_mask: Float[T, "21 4"],
 ) -> Tuple[Float[T, "ZN 14 3"], Bool[T, "ZN 14"]]:
     """
     Reconstruct atom14 coordinates from predicted frame vectors and torsion angles.
@@ -347,12 +337,16 @@ def coords_from_txy_sincos(
         sin: Sine of chi1-chi4 angles
         cos: Cosine of chi1-chi4 angles
         labels: Amino acid labels (0-19, or 20 for unknown)
+        restype_rigid_group_default_frame: AF2 constant (21, 8, 4, 4)
+        restype_atom14_rigid_group_positions: AF2 constant (21, 14, 3)
+        restype_atom14_to_rigid_group: AF2 constant (21, 14)
+        restype_atom14_mask: AF2 constant (21, 14)
+        chi_angles_mask: AF2 constant (21, 4)
 
     Returns:
         atom14_coords: (ZN, 14, 3) reconstructed atom positions
         atom_mask: (ZN, 14) boolean mask of valid atoms
     """
-    device, dtype = t.device, t.dtype
     ZN = t.shape[0]
 
     # 1. Build backbone frame from gram_schmidt
@@ -366,11 +360,11 @@ def coords_from_txy_sincos(
     chi_frames = torsion_to_frames(sin_n, cos_n)  # (ZN, 4, 3, 3)
 
     # 4. Look up AF2 constants for this sequence
-    default_frames = _get_af2_tensor('restype_rigid_group_default_frame', device, dtype)[labels]  # (ZN, 8, 4, 4)
-    rigid_pos = _get_af2_tensor('restype_atom14_rigid_group_positions', device, dtype)[labels]  # (ZN, 14, 3)
-    atom_to_group = _get_af2_tensor('restype_atom14_to_rigid_group', device, torch.long)[labels]  # (ZN, 14)
-    atom_mask_float = _get_af2_tensor('restype_atom14_mask', device, dtype)[labels]  # (ZN, 14)
-    chi_mask = torch.tensor(rc.chi_angles_mask, device=device, dtype=dtype)[labels]  # (ZN, 4)
+    default_frames = restype_rigid_group_default_frame[labels]  # (ZN, 8, 4, 4)
+    rigid_pos = restype_atom14_rigid_group_positions[labels]  # (ZN, 14, 3)
+    atom_to_group = restype_atom14_to_rigid_group[labels]  # (ZN, 14)
+    atom_mask_float = restype_atom14_mask[labels]  # (ZN, 14)
+    chi_mask = chi_angles_mask[labels]  # (ZN, 4)
 
     # 5. Compose all rigid group frames
     all_frames = torsion_angles_to_frames(backbone_frame, chi_frames, default_frames, chi_mask)  # (ZN, 8, 4, 4)
@@ -382,3 +376,91 @@ def coords_from_txy_sincos(
     atom_mask = atom_mask_float > 0.5  # (ZN, 14)
 
     return atom14_pos, atom_mask
+
+
+def kabsch_align(
+    coords_mobile: Float[T, "N 3"],
+    coords_target: Float[T, "N 3"],
+) -> Float[T, "N 3"]:
+    """
+    Align mobile coordinates onto target coordinates using the Kabsch algorithm.
+
+    Finds the optimal rotation and translation to minimize RMSD between
+    the two point sets. Both inputs must have the same number of points.
+
+    Args:
+        coords_mobile: Coordinates to be aligned (N, 3)
+        coords_target: Target coordinates to align onto (N, 3)
+
+    Returns:
+        aligned_coords: Mobile coordinates after optimal superposition (N, 3)
+    """
+    # Center both coordinate sets
+    centroid_mobile = coords_mobile.mean(dim=0, keepdim=True)
+    centroid_target = coords_target.mean(dim=0, keepdim=True)
+
+    mobile_centered = coords_mobile - centroid_mobile
+    target_centered = coords_target - centroid_target
+
+    # Compute covariance matrix H = mobile^T @ target
+    H = mobile_centered.T @ target_centered  # (3, 3)
+
+    # SVD of covariance matrix
+    U, S, Vt = torch.linalg.svd(H)
+
+    # Compute optimal rotation R = V @ U^T
+    # Handle reflection case (det(R) = -1)
+    d = torch.linalg.det(Vt.T @ U.T)
+    sign_matrix = torch.diag(torch.tensor([1.0, 1.0, d], device=coords_mobile.device, dtype=coords_mobile.dtype))
+    R = Vt.T @ sign_matrix @ U.T
+
+    # Apply rotation and translation
+    aligned = mobile_centered @ R.T + centroid_target
+
+    return aligned
+
+
+def compute_rmsd(
+    coords_pred: Float[T, "ZN 14 3"],
+    coords_true: Float[T, "ZN 14 3"],
+    atom_mask: Bool[T, "ZN 14"],
+) -> float:
+    """
+    Compute RMSD between predicted and true coordinates with masking.
+
+    Coordinates are aligned using the Kabsch algorithm before computing RMSD,
+    since protein coordinates are in arbitrary reference frames.
+
+    Args:
+        coords_pred: Predicted atom coordinates (ZN, 14, 3)
+        coords_true: True atom coordinates (ZN, 14, 3)
+        atom_mask: Boolean mask indicating which atoms to include (ZN, 14)
+
+    Returns:
+        rmsd: Root mean square deviation in Angstroms
+    """
+    # Ensure mask is boolean
+    if atom_mask.dtype != torch.bool:
+        atom_mask = atom_mask > 0.5
+
+    # Flatten to (N, 3) for masked atoms only
+    flat_mask = atom_mask.reshape(-1)  # (ZN * 14,)
+    flat_pred = coords_pred.reshape(-1, 3)  # (ZN * 14, 3)
+    flat_true = coords_true.reshape(-1, 3)  # (ZN * 14, 3)
+
+    # Extract only valid atoms
+    valid_pred = flat_pred[flat_mask]  # (N_valid, 3)
+    valid_true = flat_true[flat_mask]  # (N_valid, 3)
+
+    num_atoms = valid_pred.shape[0]
+    if num_atoms == 0:
+        return 0.0
+
+    # Align coordinates using Kabsch algorithm
+    valid_pred = kabsch_align(valid_pred, valid_true)
+
+    # Compute RMSD
+    sq_diff = (valid_pred - valid_true).pow(2).sum(dim=-1)  # (N_valid,)
+    rmsd = torch.sqrt(sq_diff.mean())
+
+    return rmsd.item()
