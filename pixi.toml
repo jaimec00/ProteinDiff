@@ -10,11 +10,11 @@ cpu = { features = ["cpu"] , solve-group = "cpu" }
 gpu = { features = ["gpu"] , solve-group = "gpu" }
 
 [activation.env]
-EXP_DIR = "$HOME/proteinDiffVirgina/experiments"
+EXP_DIR = "$HOME/proteinDiffVirgina/experiments/"
 MLFLOW_TRACKING_URI = "sqlite:///$EXP_DIR/mlruns.db"
 
 [tasks]
-local_mlflow = "mlflow server --host localhost --port 5000 --backend-store-uri $MLFLOW_TRACKING_URI --registry-store-uri $MLFLOW_TRACKING_URI --default-artifact-root $EXP_DIR/mlruns"
+local_mlflow = "mlflow server --host localhost --port 5000 --backend-store-uri $MLFLOW_TRACKING_URI"
 
 [dependencies]
 python = ">=3.12"
@@ -25,7 +25,6 @@ pandas = "*"
 pathlib = "*"
 biopython = "1.84.*"
 tqdm = "*"
-matplotlib = "*"
 einops = "*"
 omegaconf = "*"
 hydra-core = "*"
