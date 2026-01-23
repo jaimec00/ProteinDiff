@@ -8,7 +8,14 @@ import math
 
 from proteindiff.model.model_utils.mlp import MLP, MLPCfg, ProjectionHead, ProjectionHeadCfg
 from proteindiff.model.base import Base
-from proteindiff.static.constants import canonical_aas
+from proteindiff.static.constants import (
+    canonical_aas,
+    restype_rigid_group_default_frame,
+    restype_atom14_rigid_group_positions,
+    restype_atom14_to_rigid_group,
+    restype_atom14_mask,
+    chi_angles_mask,
+)
 from proteindiff.types import Bool, List, Float, Int, T, Tuple, Callable
 
 from proteindiff.training.losses.struct_losses.distogram_loss import distogram_loss as distogram_loss_fn
@@ -155,8 +162,6 @@ class UpConvBlock(Base):
 
 @dataclass
 class DownsampleModelCfg:
-    d_in: int = 256
-    d_hidden: int = 256
     d_out: int = 256
     resnet_kernel_size: int = 3  # Odd kernel for ResNetBlocks (preserves spatial dims)
     downsample_kernel_size: int = 2  # kernel=stride for DownConvBlocks
@@ -171,21 +176,57 @@ class DownsampleModel(Base):
         assert int(num_downsamples) == num_downsamples
         num_downsamples = int(num_downsamples)
 
+        # 32 64 128 256
+        d_model_list = [cfg.d_out // 2**i for i in range(num_downsamples, -1, -1)]
         blocks = []
-        first_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_in, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
-        down_conv_block_cfg = DownConvBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.downsample_kernel_size, downsample_factor=cfg.downsample_kernel_size)
-        mid_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
-        last_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_out, kernel_size=cfg.resnet_kernel_size)
 
-        blocks.append(ResNetBlock(first_resnet_cfg))
+        # initial block
+        blocks.append(
+            ResNetBlock(
+                ResNetBlockCfg(
+                    d_in=1,
+                    d_out=d_model_list[0],
+                    kernel_size=cfg.resnet_kernel_size
+                )
+            )
+        )
 
         for downsample in range(num_downsamples):
-            blocks.append(DownConvBlock(down_conv_block_cfg))
 
+            # up conv
+            blocks.append(
+                DownConvBlock(
+                    DownConvBlockCfg(
+                        d_in=d_model_list[downsample], 
+                        d_out=d_model_list[downsample+1], 
+                        kernel_size=cfg.downsample_kernel_size, 
+                        downsample_factor=cfg.downsample_kernel_size
+                    )
+                )
+            )
+
+            # resnets
             for resnet in range(cfg.resnets_per_downconv):
-                blocks.append(ResNetBlock(mid_resnet_cfg))
+                blocks.append(
+                    ResNetBlock(
+                        ResNetBlockCfg(
+                            d_in=d_model_list[downsample+1],
+                            d_out=d_model_list[downsample+1],
+                            kernel_size=cfg.resnet_kernel_size
+                        )
+                    )
+                )
 
-        blocks.append(ResNetBlock(last_resnet_cfg))
+        # post resnet
+        blocks.append(
+            ResNetBlock(
+                ResNetBlockCfg(
+                    d_in=d_model_list[-1],
+                    d_out=d_model_list[-1],
+                    kernel_size=cfg.resnet_kernel_size
+                )
+            )
+        )
 
         self.down_blocks = nn.Sequential(*blocks)
 
@@ -195,8 +236,6 @@ class DownsampleModel(Base):
 @dataclass
 class UpsampleModelCfg:
     d_in: int = 256
-    d_hidden: int = 256
-    d_out: int = 256
     resnet_kernel_size: int = 3  # Odd kernel for ResNetBlocks (preserves spatial dims)
     upsample_kernel_size: int = 2  # kernel=stride for UpConvBlocks
     final_dim: int = 16
@@ -209,22 +248,59 @@ class UpsampleModel(Base):
         num_upsamples = math.log(cfg.final_dim, 2)
         assert int(num_upsamples) == num_upsamples
         num_upsamples = int(num_upsamples)
-
+        
+        # 256 128 64 32
+        # 1   2   4  8  
+        d_model_list = [cfg.d_in // 2**i for i in range(num_upsamples+1)]
         blocks = []
-        first_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_in, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
-        up_conv_block_cfg = UpConvBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.upsample_kernel_size, upsample_factor=cfg.upsample_kernel_size)
-        mid_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_hidden, kernel_size=cfg.resnet_kernel_size)
-        last_resnet_cfg = ResNetBlockCfg(d_in=cfg.d_hidden, d_out=cfg.d_out, kernel_size=cfg.resnet_kernel_size)
 
-        blocks.append(ResNetBlock(first_resnet_cfg))
+        # initial block
+        blocks.append(
+            ResNetBlock(
+                ResNetBlockCfg(
+                    d_in=d_model_list[0],
+                    d_out=d_model_list[0],
+                    kernel_size=cfg.resnet_kernel_size
+                )
+            )
+        )
 
         for upsample in range(num_upsamples):
-            blocks.append(UpConvBlock(up_conv_block_cfg))
-        
-            for resnet in range(cfg.resnets_per_upconv):
-                blocks.append(ResNetBlock(mid_resnet_cfg))
 
-        blocks.append(ResNetBlock(last_resnet_cfg))
+            # up conv
+            blocks.append(
+                UpConvBlock(
+                    UpConvBlockCfg(
+                        d_in=d_model_list[upsample], 
+                        d_out=d_model_list[upsample+1], 
+                        kernel_size=cfg.upsample_kernel_size, 
+                        upsample_factor=cfg.upsample_kernel_size
+                    )
+                )
+            )
+
+            # resnets
+            for resnet in range(cfg.resnets_per_upconv):
+                blocks.append(
+                    ResNetBlock(
+                        ResNetBlockCfg(
+                            d_in=d_model_list[upsample+1],
+                            d_out=d_model_list[upsample+1],
+                            kernel_size=cfg.resnet_kernel_size
+                        )
+                    )
+                )
+
+        # post resnet
+        blocks.append(
+            ResNetBlock(
+                ResNetBlockCfg(
+                    d_in=d_model_list[-1],
+                    d_out=1,
+                    kernel_size=cfg.resnet_kernel_size
+                )
+            )
+        )
 
         self.up_blocks = nn.Sequential(*blocks)
 
@@ -318,6 +394,19 @@ class StructProjectionHead(Base):
         self.plddt_proj = PairwiseProjectionHead(cfg.plddt_proj)
         self.pae_proj = PairwiseProjectionHead(cfg.pae_proj)
 
+        # Register AF2 constants as buffers (non-trainable parameters)
+        # These will automatically move with the module and work with DDP/FSDP
+        self.register_buffer('restype_rigid_group_default_frame',
+                            torch.tensor(restype_rigid_group_default_frame, dtype=torch.float32))
+        self.register_buffer('restype_atom14_rigid_group_positions',
+                            torch.tensor(restype_atom14_rigid_group_positions, dtype=torch.float32))
+        self.register_buffer('restype_atom14_to_rigid_group',
+                            torch.tensor(restype_atom14_to_rigid_group, dtype=torch.long))
+        self.register_buffer('restype_atom14_mask',
+                            torch.tensor(restype_atom14_mask, dtype=torch.float32))
+        self.register_buffer('chi_angles_mask',
+                            torch.tensor(chi_angles_mask, dtype=torch.float32))
+
     def forward(
         self,
         struct_logits: Float[T, "ZN d_model"],
@@ -343,12 +432,19 @@ class StructProjectionHead(Base):
         distogram_loss = self.dist_proj(distogram_loss_fn, struct_logits, coords_cb, cu_seqlens, min_dist=min_dist, max_dist=max_dist)
         anglogram_loss = self.angle_proj(anglogram_loss_fn, struct_logits, unit_vecs, cu_seqlens)
 
-        # predict coordinates from logits 
+        # predict coordinates from logits
         txy = self.frame_proj(struct_logits)
         sincos = self.torsion_proj(struct_logits)
         t, x, y = torch.chunk(txy, chunks=3, dim=-1)
         sin, cos = torch.chunk(sincos, chunks=2, dim=-1)
-        coords_pred, _ = coords_from_txy_sincos(t, x, y, sin, cos, labels)
+        coords_pred, _ = coords_from_txy_sincos(
+            t, x, y, sin, cos, labels,
+            self.restype_rigid_group_default_frame,
+            self.restype_atom14_rigid_group_positions,
+            self.restype_atom14_to_rigid_group,
+            self.restype_atom14_mask,
+            self.chi_angles_mask
+        )
 
         distance_loss = distance_loss_fn(coords_pred, coords, atom_mask, cu_seqlens)
 

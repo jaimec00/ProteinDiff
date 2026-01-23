@@ -40,6 +40,8 @@ class MLP(Base):
 		self.in_dropout = nn.Dropout(cfg.dropout)
 		self.hidden_dropout = nn.ModuleList([nn.Dropout(cfg.dropout) for _ in range(cfg.hidden_layers)])
 
+		cfg.act = cfg.act.lower()
+
 		if cfg.act == ActivationFn.GELU:
 			self.act = F.gelu
 		elif cfg.act == ActivationFn.SILU:
