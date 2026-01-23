@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pixi run:*)",
+      "Bash(~/.pixi/bin/pixi run:*)",
+      "Bash(pixi shell:*)",
+      "Bash(pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(tree:*)",
+      "Bash(ls:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(find:*)",
+      "Bash(python -c:*)",
+      "Bash(xargs ls:*)"
+    ]
+  }
+}
