@@ -11,7 +11,8 @@ from proteus.model.vae.vae_utils import (
 )
 from proteus.model.mpnn.mpnn import MPNNModel, MPNNModelCfg
 from proteus.model.transformer.transformer import TransformerModel, TransformerModelCfg
-from proteus.types import Float, Int, Bool, T
+from proteus.types import Float, Int, Bool, T, Tuple
+from proteus.utils.tensor import unpad, repad
 
 @dataclass
 class EncoderCfg:
@@ -21,29 +22,38 @@ class EncoderCfg:
     latent_projection_head: LatentProjectionHeadCfg = field(default_factory = LatentProjectionHeadCfg)
 
 class Encoder(Base):
-    def __init__(self, cfg: EncoderCfg):
+    def __init__(self, cfg: EncoderCfg) -> None:
         super().__init__()
-        self.downsample = DownsampleModel(cfg.downsample)
-        self.mpnn = MPNNModel(cfg.mpnn)
-        self.transformer = TransformerModel(cfg.transformer)
-        self.latent_projection_head = LatentProjectionHead(cfg.latent_projection_head)
+        self.downsample: DownsampleModel = DownsampleModel(cfg.downsample)
+        self.mpnn: MPNNModel = MPNNModel(cfg.mpnn)
+        self.transformer: TransformerModel = TransformerModel(cfg.transformer)
+        self.latent_projection_head: LatentProjectionHead = LatentProjectionHead(cfg.latent_projection_head)
 
 
     def forward(
         self,
-        divergence: Float[T, "ZN 1 Vx Vy Vz"],
-        bb_coords: Float[T, "ZN 4 3"],
-        frames: Float[T, "ZN 3 3"],
-        seq_idx: Int[T, "ZN"],
-        chain_idx: Int[T, "ZN"],
-        sample_idx: Int[T, "ZN"],
-        cu_seqlens: Int[T, "Z+1"],
-        max_seqlen: int,
-    ) -> tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
+        divergence: Float[T, "B L 1 Vx Vy Vz"],
+        bb_coords: Float[T, "B L 4 3"],
+        frames: Float[T, "B L 3 3"],
+        seq_idx: Int[T, "B L"],
+        chain_idx: Int[T, "B L"],
+        pad_mask: Bool[T, "B L"],
+    ) -> Tuple[Float[T, "B L d_latent"], Float[T, "B L d_latent"], Float[T, "B L d_latent"]]:
 
-        x = self.downsample(divergence)
-        x = self.mpnn(bb_coords, frames, seq_idx, chain_idx, cu_seqlens, x)
-        x = self.transformer(x, cu_seqlens, max_seqlen)
-        latent, mu, logvar = self.latent_projection_head(x)
-        
+        # All modules now accept B,L format with pad_mask
+        x = self.downsample(divergence, pad_mask)
+        x = self.mpnn(bb_coords, frames, seq_idx, chain_idx, pad_mask, x)
+        x = self.transformer(x, pad_mask)
+
+        # Latent projection head - unpack for processing
+        [x_u], cu_seqlens, max_seqlen = unpad(x, pad_mask=pad_mask)
+
+        latent_u, mu_u, logvar_u = self.latent_projection_head(x_u)
+
+        [latent, mu, logvar] = repad(
+            latent_u, mu_u, logvar_u,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen
+        )
+
         return latent, mu, logvar

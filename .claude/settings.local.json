@@ -16,7 +16,9 @@
       "Bash(xargs ls:*)",
       "Bash(for file in ./proteus/**/*.py ./tests/**/*.py)",
       "Bash(do sed -i 's/proteindiff/proteus/g' \"$file\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(pixi info:*)",
+      "Bash(.pixi/envs/cpu/bin/python -m pytest:*)"
     ]
   }
 }

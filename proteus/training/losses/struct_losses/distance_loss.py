@@ -1,8 +1,14 @@
-import triton
-import triton.language as tl
 import torch
+from unittest.mock import MagicMock
 
 from proteus.types import Bool, Float, Int, T
+
+if torch.cuda.is_available():
+    import triton
+    import triton.language as tl
+else:
+    triton = MagicMock()
+    tl = MagicMock()
 
 
 @triton.autotune(
@@ -20,15 +26,15 @@ def distance_loss_fwd_bwd(
     # outputs
     per_token_loss_ptr, d_pred_coords_ptr,
     # shapes
-    ZN, Z, num_atoms,
-    # strides - pred_coords (ZN, num_atoms, 3)
-    stride_pred_zn, stride_pred_a, stride_pred_xyz,
-    # strides - gt_coords (ZN, num_atoms, 3)
-    stride_gt_zn, stride_gt_a, stride_gt_xyz,
-    # strides - atom_mask (ZN, num_atoms)
-    stride_mask_zn, stride_mask_a,
-    # strides - d_pred_coords (ZN, num_atoms, 3)
-    stride_dpred_zn, stride_dpred_a, stride_dpred_xyz,
+    BL, B, num_atoms,
+    # strides - pred_coords (BL, num_atoms, 3)
+    stride_pred_bl, stride_pred_a, stride_pred_xyz,
+    # strides - gt_coords (BL, num_atoms, 3)
+    stride_gt_bl, stride_gt_a, stride_gt_xyz,
+    # strides - atom_mask (BL, num_atoms)
+    stride_mask_bl, stride_mask_a,
+    # strides - d_pred_coords (BL, num_atoms, 3)
+    stride_dpred_bl, stride_dpred_a, stride_dpred_xyz,
     # clamp threshold
     clamp_max: tl.constexpr,
     # block size for atoms (power of 2, >= num_atoms)
@@ -54,7 +60,7 @@ def distance_loss_fwd_bwd(
     # find sequence bounds via linear search
     seq_start = 0
     seq_end = 0
-    for s in range(Z):
+    for s in range(B):
         start_s = tl.load(cu_seqlens_ptr + s)
         end_s = tl.load(cu_seqlens_ptr + s + 1)
         if start_s <= pid and pid < end_s:
@@ -69,33 +75,33 @@ def distance_loss_fwd_bwd(
 
     # Load atom_mask[i, :] - shape (BLOCK_A,) bool
     atom_mask_i = tl.load(
-        atom_mask_ptr + pid * stride_mask_zn + offs_a * stride_mask_a,
+        atom_mask_ptr + pid * stride_mask_bl + offs_a * stride_mask_a,
         mask=block_mask, other=False
     )
 
     # Load pred_coords[i, :, :] and gt_coords[i, :, :] - shape (BLOCK_A, 3)
     pred_i_x = tl.load(
-        pred_coords_ptr + pid * stride_pred_zn + offs_a * stride_pred_a + 0,
+        pred_coords_ptr + pid * stride_pred_bl + offs_a * stride_pred_a + 0,
         mask=block_mask, other=0.0
     )
     pred_i_y = tl.load(
-        pred_coords_ptr + pid * stride_pred_zn + offs_a * stride_pred_a + 1,
+        pred_coords_ptr + pid * stride_pred_bl + offs_a * stride_pred_a + 1,
         mask=block_mask, other=0.0
     )
     pred_i_z = tl.load(
-        pred_coords_ptr + pid * stride_pred_zn + offs_a * stride_pred_a + 2,
+        pred_coords_ptr + pid * stride_pred_bl + offs_a * stride_pred_a + 2,
         mask=block_mask, other=0.0
     )
     gt_i_x = tl.load(
-        gt_coords_ptr + pid * stride_gt_zn + offs_a * stride_gt_a + 0,
+        gt_coords_ptr + pid * stride_gt_bl + offs_a * stride_gt_a + 0,
         mask=block_mask, other=0.0
     )
     gt_i_y = tl.load(
-        gt_coords_ptr + pid * stride_gt_zn + offs_a * stride_gt_a + 1,
+        gt_coords_ptr + pid * stride_gt_bl + offs_a * stride_gt_a + 1,
         mask=block_mask, other=0.0
     )
     gt_i_z = tl.load(
-        gt_coords_ptr + pid * stride_gt_zn + offs_a * stride_gt_a + 2,
+        gt_coords_ptr + pid * stride_gt_bl + offs_a * stride_gt_a + 2,
         mask=block_mask, other=0.0
     )
 
@@ -121,7 +127,7 @@ def distance_loss_fwd_bwd(
     for j in range(seq_start, seq_end):
         # Load atom_mask[j, :] - shape (BLOCK_A,) bool
         atom_mask_j = tl.load(
-            atom_mask_ptr + j * stride_mask_zn + offs_a * stride_mask_a,
+            atom_mask_ptr + j * stride_mask_bl + offs_a * stride_mask_a,
             mask=block_mask, other=False
         )
 
@@ -131,27 +137,27 @@ def distance_loss_fwd_bwd(
 
         # Load pred_coords[j, :, :] and gt_coords[j, :, :] - shape (BLOCK_A,)
         pred_j_x = tl.load(
-            pred_coords_ptr + j * stride_pred_zn + offs_a * stride_pred_a + 0,
+            pred_coords_ptr + j * stride_pred_bl + offs_a * stride_pred_a + 0,
             mask=block_mask, other=0.0
         )
         pred_j_y = tl.load(
-            pred_coords_ptr + j * stride_pred_zn + offs_a * stride_pred_a + 1,
+            pred_coords_ptr + j * stride_pred_bl + offs_a * stride_pred_a + 1,
             mask=block_mask, other=0.0
         )
         pred_j_z = tl.load(
-            pred_coords_ptr + j * stride_pred_zn + offs_a * stride_pred_a + 2,
+            pred_coords_ptr + j * stride_pred_bl + offs_a * stride_pred_a + 2,
             mask=block_mask, other=0.0
         )
         gt_j_x = tl.load(
-            gt_coords_ptr + j * stride_gt_zn + offs_a * stride_gt_a + 0,
+            gt_coords_ptr + j * stride_gt_bl + offs_a * stride_gt_a + 0,
             mask=block_mask, other=0.0
         )
         gt_j_y = tl.load(
-            gt_coords_ptr + j * stride_gt_zn + offs_a * stride_gt_a + 1,
+            gt_coords_ptr + j * stride_gt_bl + offs_a * stride_gt_a + 1,
             mask=block_mask, other=0.0
         )
         gt_j_z = tl.load(
-            gt_coords_ptr + j * stride_gt_zn + offs_a * stride_gt_a + 2,
+            gt_coords_ptr + j * stride_gt_bl + offs_a * stride_gt_a + 2,
             mask=block_mask, other=0.0
         )
 
@@ -224,24 +230,24 @@ def distance_loss_fwd_bwd(
 
     # Store gradients for d_pred_coords[i, :, :]
     tl.store(
-        d_pred_coords_ptr + pid * stride_dpred_zn + offs_a * stride_dpred_a + 0,
+        d_pred_coords_ptr + pid * stride_dpred_bl + offs_a * stride_dpred_a + 0,
         d_pred_i_x, mask=block_mask
     )
     tl.store(
-        d_pred_coords_ptr + pid * stride_dpred_zn + offs_a * stride_dpred_a + 1,
+        d_pred_coords_ptr + pid * stride_dpred_bl + offs_a * stride_dpred_a + 1,
         d_pred_i_y, mask=block_mask
     )
     tl.store(
-        d_pred_coords_ptr + pid * stride_dpred_zn + offs_a * stride_dpred_a + 2,
+        d_pred_coords_ptr + pid * stride_dpred_bl + offs_a * stride_dpred_a + 2,
         d_pred_i_z, mask=block_mask
     )
 
 
 def distance_loss(
-    pred_coords: Float[T, "ZN num_atoms 3"],
-    gt_coords: Float[T, "ZN num_atoms 3"],
-    atom_mask: Bool[T, "ZN num_atoms"],
-    cu_seqlens: Int[T, "Z+1"],
+    pred_coords: Float[T, "BL num_atoms 3"],
+    gt_coords: Float[T, "BL num_atoms 3"],
+    atom_mask: Bool[T, "BL num_atoms"],
+    cu_seqlens: Int[T, "B+1"],
     clamp_max: float = 25.0,
 ) -> Float[T, "1"]:
     return DistanceLoss.apply(pred_coords, gt_coords, atom_mask, cu_seqlens, clamp_max)
@@ -252,25 +258,25 @@ class DistanceLoss(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        pred_coords: Float[T, "ZN num_atoms 3"],
-        gt_coords: Float[T, "ZN num_atoms 3"],
-        atom_mask: Bool[T, "ZN num_atoms"],
-        cu_seqlens: Int[T, "Z+1"],
+        pred_coords: Float[T, "BL num_atoms 3"],
+        gt_coords: Float[T, "BL num_atoms 3"],
+        atom_mask: Bool[T, "BL num_atoms"],
+        cu_seqlens: Int[T, "B+1"],
         clamp_max: float,
     ) -> Float[T, "1"]:
         # shapes
-        ZN, num_atoms, _ = pred_coords.shape
-        Z = cu_seqlens.shape[0] - 1
+        BL, num_atoms, _ = pred_coords.shape
+        B = cu_seqlens.shape[0] - 1
 
         # assertions
         assert pred_coords.shape == gt_coords.shape, (
             f"pred_coords {pred_coords.shape} != gt_coords {gt_coords.shape}"
         )
         assert pred_coords.shape[2] == 3, f"pred_coords last dim {pred_coords.shape[2]} != 3"
-        assert atom_mask.shape == (ZN, num_atoms), (
-            f"atom_mask {atom_mask.shape} != ({ZN}, {num_atoms})"
+        assert atom_mask.shape == (BL, num_atoms), (
+            f"atom_mask {atom_mask.shape} != ({BL}, {num_atoms})"
         )
-        assert cu_seqlens.shape == (Z + 1,), f"cu_seqlens {cu_seqlens.shape} != ({Z + 1},)"
+        assert cu_seqlens.shape == (B + 1,), f"cu_seqlens {cu_seqlens.shape} != ({B + 1},)"
         assert pred_coords.is_cuda and gt_coords.is_cuda and cu_seqlens.is_cuda and atom_mask.is_cuda
 
         # get orig dtype
@@ -283,12 +289,12 @@ class DistanceLoss(torch.autograd.Function):
         cu_seqlens = cu_seqlens.to(torch.int32).contiguous()
 
         # allocate outputs (fp32)
-        per_token_loss = torch.zeros(ZN, device=pred_coords.device, dtype=torch.float32)
-        d_pred_coords = torch.zeros(ZN, num_atoms, 3, device=pred_coords.device, dtype=torch.float32)
+        per_token_loss = torch.zeros(BL, device=pred_coords.device, dtype=torch.float32)
+        d_pred_coords = torch.zeros(BL, num_atoms, 3, device=pred_coords.device, dtype=torch.float32)
 
         # block size for atoms (power of 2, >= num_atoms)
         BLOCK_A = max(16, triton.next_power_of_2(num_atoms))
-        grid = (ZN,)
+        grid = (BL,)
 
         # launch kernel
         distance_loss_fwd_bwd[grid](
@@ -297,7 +303,7 @@ class DistanceLoss(torch.autograd.Function):
             # outputs
             per_token_loss, d_pred_coords,
             # shapes
-            ZN, Z, num_atoms,
+            BL, B, num_atoms,
             # strides - pred_coords
             pred_coords.stride(0), pred_coords.stride(1), pred_coords.stride(2),
             # strides - gt_coords

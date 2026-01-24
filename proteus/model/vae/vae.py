@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from proteus.model.base import Base
 from proteus.model.vae.encoder import Encoder, EncoderCfg 
 from proteus.model.vae.decoder import Decoder, DecoderCfg
-from proteus.types import Float, Int, T, Tuple
+from proteus.types import Float, Int, Bool, T, Tuple, Dict, Any
 
 @dataclass
 class VAEModelCfg:
@@ -15,37 +15,20 @@ class VAEModelCfg:
     decoder: DecoderCfg = field(default_factory=DecoderCfg)
 
 class VAEModel(Base):
-    def __init__(self, cfg: VAEModelCfg):
+    def __init__(self, cfg: VAEModelCfg) -> None:
         super().__init__()
-        self.encoder = Encoder(cfg.encoder)
-        self.decoder = Decoder(cfg.decoder)
+        self.encoder: Encoder = Encoder(cfg.encoder)
+        self.decoder: Decoder = Decoder(cfg.decoder)
 
     def forward(
         self,
-		divergence: Float[T, "ZN 1 Vx Vy Vz"],
-        coords_bb: Float[T, "ZN 14 3"],
-		frames: Float[T, "ZN 3 3"],
-		seq_idx: Int[T, "ZN"],
-		chain_idx: Int[T, "ZN"],
-        sample_idx: Int[T, "ZN"],
-		cu_seqlens: Int[T, "Z+1"],
-		max_seqlen: int,
-    ) -> Tuple[
-        Float[T, "ZN d_latent"],
-        Float[T, "ZN d_latent"],
-        Float[T, "ZN d_latent"],
-        Float[T, "ZN 1 Vx Vy Vz"],
-        Float[T, "ZN n_aa"],
-        Float[T, "ZN ZN d_dist"],
-        Float[T, "ZN ZN d_angle"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 7"],
-        Float[T, "ZN 7"],
-        Float[T, "ZN ZN d_plddt"],
-        Float[T, "ZN ZN d_pae"],
-    ]:
+        divergence: Float[T, "B L 1 Vx Vy Vz"],
+        coords_bb: Float[T, "B L 4 3"],
+        frames: Float[T, "B L 3 3"],
+        seq_idx: Int[T, "B L"],
+        chain_idx: Int[T, "B L"],
+        pad_mask: Bool[T, "B L"],
+    ) -> Dict[str, Any]:
 
         latent, mu, logvar = self.encoder(
             divergence,
@@ -53,21 +36,14 @@ class VAEModel(Base):
             frames,
             seq_idx,
             chain_idx,
-            sample_idx,
-            cu_seqlens,
-            max_seqlen
+            pad_mask
         )
-        (
-            divergence_pred, 
-            seq_pred, 
-            struct_logits,
-            struct_head,
-        ) = self.decoder(latent, cu_seqlens, max_seqlen)
 
-        return (
-            latent, mu, logvar,
-            divergence_pred, 
-            seq_pred, 
-            struct_logits,
-            struct_head,
-        )
+        decoder_outputs = self.decoder(latent, pad_mask)
+
+        return {
+            "latent": latent,
+            "mu": mu,
+            "logvar": logvar,
+            **decoder_outputs
+        }

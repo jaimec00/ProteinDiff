@@ -16,7 +16,8 @@ from proteus.static.constants import (
     restype_atom14_mask,
     chi_angles_mask,
 )
-from proteus.types import Bool, List, Float, Int, T, Tuple, Callable
+from proteus.types import Bool, List, Float, Int, T, Tuple, Callable, Optional
+from proteus.utils.tensor import unpad, repad
 
 from proteus.training.losses.struct_losses.distogram_loss import distogram_loss as distogram_loss_fn
 from proteus.training.losses.struct_losses.anglogram_loss import anglogram_loss as anglogram_loss_fn
@@ -35,15 +36,15 @@ class ResNetBlockCfg:
     kernel_size: int = 3  # Use odd kernel size to avoid copy with padding="same"
 
 class ResNetBlock(Base):
-    def __init__(self, cfg: ResNetBlockCfg):
+    def __init__(self, cfg: ResNetBlockCfg) -> None:
         super().__init__()
 
         # Use explicit padding for odd kernels: padding = kernel_size // 2
         # This avoids the copy that padding="same" creates with even kernels
-        padding = cfg.kernel_size // 2
+        padding: int = cfg.kernel_size // 2
 
-        d_in = cfg.d_in
-        self.pre_conv = None
+        d_in: int = cfg.d_in
+        self.pre_conv: Optional[nn.Sequential] = None
         if cfg.d_in != cfg.d_out:
             self.pre_conv = nn.Sequential(
                 nn.Conv3d(cfg.d_in, cfg.d_out, cfg.kernel_size, stride=1, padding=padding, bias=False),
@@ -52,14 +53,14 @@ class ResNetBlock(Base):
             )
             d_in = cfg.d_out
 
-        self.conv = nn.Sequential(
+        self.conv: nn.Sequential = nn.Sequential(
             nn.Conv3d(d_in, cfg.d_out, cfg.kernel_size, stride=1, padding=padding, bias=False),
             nn.GroupNorm(max(cfg.d_out//16, 1), cfg.d_out),
             nn.SiLU()
         )
 
 
-    def forward(self, x: Float[T, "ZN C Vx Vy Vz"]) -> Float[T, "ZN C Vx Vy Vz"]:
+    def forward(self, x: Float[T, "BL C Vx Vy Vz"]) -> Float[T, "BL C Vx Vy Vz"]:
         x1 = self.pre_conv(x) if self.pre_conv else x
         return x1 + self.conv(x1)
 
@@ -71,13 +72,13 @@ class DownConvBlockCfg:
     downsample_factor: int = 2
 
 class DownConvBlock(Base):
-    def __init__(self, cfg: DownConvBlockCfg):
+    def __init__(self, cfg: DownConvBlockCfg) -> None:
         super().__init__()
 
         # Infer padding from kernel_size and downsample_factor
-        padding = self._infer_padding(cfg.kernel_size, cfg.downsample_factor)
+        padding: int = self._infer_padding(cfg.kernel_size, cfg.downsample_factor)
 
-        self.conv = nn.Sequential(
+        self.conv: nn.Sequential = nn.Sequential(
             nn.Conv3d(cfg.d_in, cfg.d_out, cfg.kernel_size, stride=cfg.downsample_factor, padding=padding, bias=False),
             nn.GroupNorm(max(cfg.d_out//16, 1), cfg.d_out),
             nn.SiLU()
@@ -111,7 +112,7 @@ class DownConvBlock(Base):
             f"Use kernel_size=stride for padding=0, or kernel_size=3 with stride=2."
         )
 
-    def forward(self, x: Float[T, "ZN C Vx Vy Vz"]) -> Float[T, "ZN Cout Vx//d Vy//d Vz//d"]:
+    def forward(self, x: Float[T, "BL C Vx Vy Vz"]) -> Float[T, "BL Cout Vx//d Vy//d Vz//d"]:
         return self.conv(x)
 
 
@@ -123,13 +124,13 @@ class UpConvBlockCfg:
     upsample_factor: int = 2
 
 class UpConvBlock(Base):
-    def __init__(self, cfg: UpConvBlockCfg):
+    def __init__(self, cfg: UpConvBlockCfg) -> None:
         super().__init__()
 
         # Infer padding for transposed conv upsampling
-        padding = self._infer_padding(cfg.kernel_size, cfg.upsample_factor)
+        padding: int = self._infer_padding(cfg.kernel_size, cfg.upsample_factor)
 
-        self.conv = nn.Sequential(
+        self.conv: nn.Sequential = nn.Sequential(
             nn.ConvTranspose3d(cfg.d_in, cfg.d_out, cfg.kernel_size, stride=cfg.upsample_factor, padding=padding, bias=False),
             nn.GroupNorm(max(cfg.d_out//16, 1), cfg.d_out),
             nn.SiLU()
@@ -157,7 +158,7 @@ class UpConvBlock(Base):
             f"Use kernel_size=stride for padding=0, or ensure (kernel_size - stride) is even."
         )
 
-    def forward(self, x: Float[T, "ZN C Vx Vy Vz"]) -> Float[T, "ZN Cout Vx*u Vy*u Vz*u"]:
+    def forward(self, x: Float[T, "BL C Vx Vy Vz"]) -> Float[T, "BL Cout Vx*u Vy*u Vz*u"]:
         return self.conv(x)
 
 @dataclass
@@ -169,16 +170,16 @@ class DownsampleModelCfg:
     resnets_per_downconv: int = 3
 
 class DownsampleModel(Base):
-    def __init__(self, cfg: DownsampleModelCfg):
+    def __init__(self, cfg: DownsampleModelCfg) -> None:
         super().__init__()
 
-        num_downsamples = math.log(cfg.starting_dim, 2)
+        num_downsamples: float = math.log(cfg.starting_dim, 2)
         assert int(num_downsamples) == num_downsamples
-        num_downsamples = int(num_downsamples)
+        num_downsamples_int: int = int(num_downsamples)
 
         # 32 64 128 256
-        d_model_list = [cfg.d_out // 2**i for i in range(num_downsamples, -1, -1)]
-        blocks = []
+        d_model_list: List[int] = [cfg.d_out // 2**i for i in range(num_downsamples_int, -1, -1)]
+        blocks: List[nn.Module] = []
 
         # initial block
         blocks.append(
@@ -191,7 +192,7 @@ class DownsampleModel(Base):
             )
         )
 
-        for downsample in range(num_downsamples):
+        for downsample in range(num_downsamples_int):
 
             # up conv
             blocks.append(
@@ -228,10 +229,23 @@ class DownsampleModel(Base):
             )
         )
 
-        self.down_blocks = nn.Sequential(*blocks)
+        self.down_blocks: nn.Sequential = nn.Sequential(*blocks)
 
-    def forward(self, x: Float[T, "ZN C Vx Vy Vz"]) -> Float[T, "ZN d_model"]:
-        return self.down_blocks(x).reshape(x.size(0), -1)
+    def forward(
+        self,
+        x: Float[T, "B L C Vx Vy Vz"],
+        pad_mask: Bool[T, "B L"]
+    ) -> Float[T, "B L d_model"]:
+        # Unpad B,L → BL for CNN processing
+        [x_unpacked], cu_seqlens, max_seqlen = unpad(x, pad_mask=pad_mask)
+
+        # Process with CNNs (existing logic)
+        out_unpacked = self.down_blocks(x_unpacked).reshape(x_unpacked.size(0), -1)
+
+        # Repad BL → B,L
+        [out_padded] = repad(out_unpacked, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+
+        return out_padded
 
 @dataclass
 class UpsampleModelCfg:
@@ -242,17 +256,17 @@ class UpsampleModelCfg:
     resnets_per_upconv: int = 3
 
 class UpsampleModel(Base):
-    def __init__(self, cfg: UpsampleModelCfg):
+    def __init__(self, cfg: UpsampleModelCfg) -> None:
         super().__init__()
 
-        num_upsamples = math.log(cfg.final_dim, 2)
+        num_upsamples: float = math.log(cfg.final_dim, 2)
         assert int(num_upsamples) == num_upsamples
-        num_upsamples = int(num_upsamples)
-        
+        num_upsamples_int: int = int(num_upsamples)
+
         # 256 128 64 32
-        # 1   2   4  8  
-        d_model_list = [cfg.d_in // 2**i for i in range(num_upsamples+1)]
-        blocks = []
+        # 1   2   4  8
+        d_model_list: List[int] = [cfg.d_in // 2**i for i in range(num_upsamples_int+1)]
+        blocks: List[nn.Module] = []
 
         # initial block
         blocks.append(
@@ -265,7 +279,7 @@ class UpsampleModel(Base):
             )
         )
 
-        for upsample in range(num_upsamples):
+        for upsample in range(num_upsamples_int):
 
             # up conv
             blocks.append(
@@ -302,11 +316,24 @@ class UpsampleModel(Base):
             )
         )
 
-        self.up_blocks = nn.Sequential(*blocks)
+        self.up_blocks: nn.Sequential = nn.Sequential(*blocks)
 
-    def forward(self, x: Float[T, "ZN C"]) -> Float[T, "ZN C Vx Vy Vz"]:
-        x = self.up_blocks(x.reshape(*x.shape, 1, 1, 1))
-        return x
+    def forward(
+        self,
+        x: Float[T, "B L d_latent"],
+        pad_mask: Bool[T, "B L"]
+    ) -> Float[T, "B L 1 Vx Vy Vz"]:
+        # Unpad B,L → BL for CNN processing
+        [x_unpacked], cu_seqlens, max_seqlen = unpad(x, pad_mask=pad_mask)
+
+        # Existing CNN logic
+        x_unpacked = x_unpacked.reshape(*x_unpacked.shape, 1, 1, 1)
+        out_unpacked = self.up_blocks(x_unpacked)
+
+        # Repad BL → B,L
+        [out_padded] = repad(out_unpacked, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+
+        return out_padded
 
 
 @dataclass
@@ -315,11 +342,11 @@ class LatentProjectionHeadCfg:
     d_latent: int = 16
 
 class LatentProjectionHead(ProjectionHead):
-    def __init__(self, cfg: LatentProjectionHeadCfg):
-        projection_cfg = ProjectionHeadCfg(d_in=cfg.d_model, d_out=2*cfg.d_latent)
+    def __init__(self, cfg: LatentProjectionHeadCfg) -> None:
+        projection_cfg: ProjectionHeadCfg = ProjectionHeadCfg(d_in=cfg.d_model, d_out=2*cfg.d_latent)
         super().__init__(projection_cfg)
 
-    def forward(self, x: Float[T, "ZN d_model"]) -> Tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
+    def forward(self, x: Float[T, "BL d_model"]) -> Tuple[Float[T, "BL d_latent"], Float[T, "BL d_latent"], Float[T, "BL d_latent"]]:
         mu_logvar = super().forward(x) # TODO: change this as wont run preforward hooks once implement fsdp (or maybe it will since it inherits ProjectionHead weights and called forward on the child?)
         mu, logvar = torch.chunk(mu_logvar, chunks=2, dim=-1)
         latent = mu + torch.randn_like(mu)*torch.exp(-0.5*logvar)
@@ -330,14 +357,14 @@ class SeqProjectionHeadCfg:
     d_model: int = 256
 
 class SeqProjectionHead(ProjectionHead):
-    def __init__(self, cfg: SeqProjectionHeadCfg):
-        projection_cfg = ProjectionHeadCfg(
-            d_in=cfg.d_model, 
+    def __init__(self, cfg: SeqProjectionHeadCfg) -> None:
+        projection_cfg: ProjectionHeadCfg = ProjectionHeadCfg(
+            d_in=cfg.d_model,
             d_out=len(canonical_aas),
         )
         super().__init__(projection_cfg)
 
-def _qk_proj_default():
+def _qk_proj_default() -> ProjectionHeadCfg:
     return ProjectionHeadCfg(d_in=256, d_out=64)
 
 @dataclass
@@ -349,20 +376,20 @@ class PairwiseProjectionHeadCfg:
     qk_proj: ProjectionHeadCfg = field(default_factory=_qk_proj_default)
 
 class PairwiseProjectionHead(Base):
-    def __init__(self, cfg: PairwiseProjectionHeadCfg):
+    def __init__(self, cfg: PairwiseProjectionHeadCfg) -> None:
         super().__init__()
-        self.Wqk = ProjectionHead(cfg.qk_proj)
-        self.fc1 = nn.Linear(cfg.d_down, cfg.d_down, bias=False)
-        self.fc2 = nn.Linear(cfg.d_down, cfg.num_outputs * cfg.num_bins, bias=False)
-        self.num_outputs = cfg.num_outputs
+        self.Wqk: ProjectionHead = ProjectionHead(cfg.qk_proj)
+        self.fc1: nn.Linear = nn.Linear(cfg.d_down, cfg.d_down, bias=False)
+        self.fc2: nn.Linear = nn.Linear(cfg.d_down, cfg.num_outputs * cfg.num_bins, bias=False)
+        self.num_outputs: int = cfg.num_outputs
 
-    def forward(self, 
+    def forward(self,
         loss_fn: Callable,
-        x: Float[T, "ZN d_model"],
+        x: Float[T, "BL d_model"],
         *args, **kwargs
-    ) -> Float[T, "ZN ZN d_bins"]:
+    ) -> Float[T, "BL BL d_bins"]:
         '''
-        in order to avoid materializing the full ZNxZNxd_down tensor,
+        in order to avoid materializing the full BLxBLxd_down tensor,
         this is not called until we are computing the loss function,
         and to be generalizable to other modules, it also takes in a loss function
         as an argument, which is implemented as a triton kernel (see proteus/training/losses/struct_losses)
@@ -373,7 +400,7 @@ class PairwiseProjectionHead(Base):
         return loss
 
 
-def _angle_proj_default():
+def _angle_proj_default() -> PairwiseProjectionHeadCfg:
     return PairwiseProjectionHeadCfg(num_outputs=6)
 
 @dataclass
@@ -385,14 +412,14 @@ class StructProjectionHeadCfg:
     pae_proj: PairwiseProjectionHeadCfg = field(default_factory = PairwiseProjectionHeadCfg)
 
 class StructProjectionHead(Base):
-    def __init__(self, cfg: StructProjectionHeadCfg):
+    def __init__(self, cfg: StructProjectionHeadCfg) -> None:
         super().__init__()
-        self.dist_proj = PairwiseProjectionHead(cfg.dist_proj)
-        self.angle_proj = PairwiseProjectionHead(cfg.angle_proj)
-        self.frame_proj = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=3*3))
-        self.torsion_proj = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=4*2))
-        self.plddt_proj = PairwiseProjectionHead(cfg.plddt_proj)
-        self.pae_proj = PairwiseProjectionHead(cfg.pae_proj)
+        self.dist_proj: PairwiseProjectionHead = PairwiseProjectionHead(cfg.dist_proj)
+        self.angle_proj: PairwiseProjectionHead = PairwiseProjectionHead(cfg.angle_proj)
+        self.frame_proj: ProjectionHead = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=3*3))
+        self.torsion_proj: ProjectionHead = ProjectionHead(ProjectionHeadCfg(d_in=cfg.d_model, d_out=4*2))
+        self.plddt_proj: PairwiseProjectionHead = PairwiseProjectionHead(cfg.plddt_proj)
+        self.pae_proj: PairwiseProjectionHead = PairwiseProjectionHead(cfg.pae_proj)
 
         # Register AF2 constants as buffers (non-trainable parameters)
         # These will automatically move with the module and work with DDP/FSDP
@@ -409,25 +436,25 @@ class StructProjectionHead(Base):
 
     def forward(
         self,
-        struct_logits: Float[T, "ZN d_model"],
-        coords: Float[T, "ZN 14 3"],
-        coords_cb: Float[T, "ZN 3"],
-        unit_vecs: Float[T, "ZN 3 3"],
-        cu_seqlens: Int[T, "Z+1"],
-        labels: Float[T, "ZN"],
-        atom_mask: Bool[T, "ZN 14"],
+        struct_logits: Float[T, "BL d_model"],
+        coords: Float[T, "BL 14 3"],
+        coords_cb: Float[T, "BL 3"],
+        unit_vecs: Float[T, "BL 3 3"],
+        cu_seqlens: Int[T, "B+1"],
+        labels: Float[T, "BL"],
+        atom_mask: Bool[T, "BL 14"],
         min_dist: int,
         max_dist: int,
     )-> Tuple[
-        Float[T, "ZN ZNN d_dist"], 
-        Float[T, "ZN ZNN d_angle"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 3"],
-        Float[T, "ZN 7"],
-        Float[T, "ZN 7"],
-        Float[T, "ZN ZNN d_plddt"],
-        Float[T, "ZN ZNN d_pae"],
+        Float[T, "BL BLL d_dist"],
+        Float[T, "BL BLL d_angle"],
+        Float[T, "BL 3"],
+        Float[T, "BL 3"],
+        Float[T, "BL 3"],
+        Float[T, "BL 7"],
+        Float[T, "BL 7"],
+        Float[T, "BL BLL d_plddt"],
+        Float[T, "BL BLL d_pae"],
     ]:
         distogram_loss = self.dist_proj(distogram_loss_fn, struct_logits, coords_cb, cu_seqlens, min_dist=min_dist, max_dist=max_dist)
         anglogram_loss = self.angle_proj(anglogram_loss_fn, struct_logits, unit_vecs, cu_seqlens)

@@ -9,7 +9,8 @@ import math
 
 from proteus.static.constants import canonical_aas
 from proteus.utils.struct_utils import get_bb_vecs
-from typing import Dict, List
+from typing import Dict, List, Tuple, Any, Union
+from proteus.types import Float, Int, Bool, T
 
 from dataclasses import dataclass, field
 
@@ -28,7 +29,7 @@ class LossFnCfg:
 	angle_weight: float = 0.0,
 	plddt_weight: float = 0.0,
 	pae_weight: float = 0.0,
-	dist_range: tuple[float, float] = (2.0, 22.0)
+	dist_range: Tuple[float, float] = (2.0, 22.0)
 
 @dataclass
 class TrainingRunLossesCfg:
@@ -39,11 +40,11 @@ class TrainingRunLosses:
 
 	def __init__(self, cfg: TrainingRunLossesCfg) -> None:
 
-		self.loss_fn = LossFn(cfg.loss_fn)
-		self.train = LossHolder(cfg.train_type)
-		self.val = LossHolder(cfg.train_type)
-		self.test = LossHolder(cfg.train_type)
-		self.tmp = LossHolder(cfg.train_type)
+		self.loss_fn: LossFn = LossFn(cfg.loss_fn)
+		self.train: LossHolder = LossHolder(cfg.train_type)
+		self.val: LossHolder = LossHolder(cfg.train_type)
+		self.test: LossHolder = LossHolder(cfg.train_type)
+		self.tmp: LossHolder = LossHolder(cfg.train_type)
 
 	def clear_tmp_losses(self) -> None:
 		self.tmp.clear_losses()
@@ -61,40 +62,40 @@ class LossHolder:
 	'''
 	class to store losses
 	'''
-	def __init__(self, train_type: str) -> None: 
+	def __init__(self, train_type: str) -> None:
 
 		if train_type=="vae":
-			self.losses = {	
+			self.losses: Dict[str, List[Union[torch.Tensor, float]]] = {
 				"full_loss": [],
 				"kl_div": [],
 				"div_mse": [],
-				"seq_cel": [],		
+				"seq_cel": [],
 				"seq_accuracy": [],
 				"seq_probs": [],
-				"distogram_cel": [],					
+				"distogram_cel": [],
 				"anglogram_cel": [],
-				"dist_loss": [], 
-				"angle_loss": [], 
-				"plddt_loss": [], 
+				"dist_loss": [],
+				"angle_loss": [],
+				"plddt_loss": [],
 				"pae_loss": [],
 			}
 		elif train_type=="diffusion":
-			self.losses = {"full_loss": [], "diffusion_mse": []}
-		
-		# to scale losses for logging, does not affect backprop
-		self.valid_toks = 0 # valid tokens to compute avg per token
+			self.losses: Dict[str, List[Union[torch.Tensor, float]]] = {"full_loss": [], "diffusion_mse": []}
 
-	def get_avg(self) -> None:
+		# to scale losses for logging, does not affect backprop
+		self.valid_toks: Union[int, torch.Tensor] = 0 # valid tokens to compute avg per token
+
+	def get_avg(self) -> Dict[str, float]:
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
 		losses = {loss_type: sum(loss.item() if isinstance(loss, torch.Tensor) else loss for loss in loss_list) / max(1,self.valid_toks.item() if isinstance(self.valid_toks, torch.Tensor) else self.valid_toks) for loss_type, loss_list in self.losses.items()}
 		return losses
 
-	def add_losses(self, losses: Dict[str, List[torch.Tensor | float]], valid_toks: int=1) -> None:
+	def add_losses(self, losses: Dict[str, Union[torch.Tensor, float]], valid_toks: int=1) -> None:
 		for loss_type, loss in losses.items():
 			self.losses[loss_type].append(loss)
 		self.valid_toks += valid_toks
 
-	def extend_losses(self, other: Losses) -> None:
+	def extend_losses(self, other: 'LossHolder') -> None:
 		if isinstance(self.valid_toks, torch.Tensor):
 			other.to(self.valid_toks.device)
 		for loss_type, losses in other.losses.items():
@@ -113,10 +114,10 @@ class LossHolder:
 		'''utility when plotting losses w/ matplotlib'''
 		self.losses = {loss_type: [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else loss for loss in losses] for loss_type, losses in self.losses.items()}
 
-	def get_last_loss(self) -> float | torch.Tensor:
+	def get_last_loss(self) -> Union[float, torch.Tensor]:
 		return self.losses["full_loss"][-1]
 
-	def get_last_losses(self, scale=1):
+	def get_last_losses(self, scale: float = 1) -> Dict[str, float]:
 		return {k: losses[-1].item()*scale for k, losses in self.losses.items()}
 
 	def __len__(self) -> int:
@@ -128,35 +129,37 @@ class LossHolder:
 
 class LossFn:
 
-	def __init__(self, cfg: LossFnCfg):
-		self.seq_cel = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=cfg.seq_lbl_smooth)
-		
-		# weights
-		self.kl_div_weight = cfg.kl_div_weight
-		self.div_mse_weight = cfg.div_mse_weight
-		self.seq_weight = cfg.seq_weight
-		self.distogram_weight = cfg.distogram_weight
-		self.anglogram_weight = cfg.anglogram_weight
-		self.dist_weight = cfg.dist_weight
-		self.angle_weight = cfg.angle_weight
-		self.plddt_weight = cfg.plddt_weight
-		self.pae_weight = cfg.pae_weight
+	def __init__(self, cfg: LossFnCfg) -> None:
+		self.seq_cel: CrossEntropyLoss = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=cfg.seq_lbl_smooth)
 
+		# weights
+		self.kl_div_weight: float = cfg.kl_div_weight
+		self.div_mse_weight: float = cfg.div_mse_weight
+		self.seq_weight: float = cfg.seq_weight
+		self.distogram_weight: float = cfg.distogram_weight
+		self.anglogram_weight: float = cfg.anglogram_weight
+		self.dist_weight: float = cfg.dist_weight
+		self.angle_weight: float = cfg.angle_weight
+		self.plddt_weight: float = cfg.plddt_weight
+		self.pae_weight: float = cfg.pae_weight
+
+		self.min_dist: float
+		self.max_dist: float
 		self.min_dist, self.max_dist = cfg.dist_range
 
 	def vae_loss(
 		self,
-		latent_mu: Float[T, "ZN"],
-		latent_logvar: Float[T, "ZN"],
-		divergence_pred: Float[T, "ZN"],
-		divergence_true: Float[T, "ZN"],
-		seq_pred: Float[T, "ZN"],
-		seq_true: Float[T, "ZN"],
-		struct_logits: Float[T, "ZN"],
-		struct_head,
-		coords: Float[T, "ZN 14 3"],
-		cu_seqlens: Int[T, "Z+1"],
-		atom_mask: Bool[T, "ZN, 14"],
+		latent_mu: Float[T, "BL"],
+		latent_logvar: Float[T, "BL"],
+		divergence_pred: Float[T, "BL"],
+		divergence_true: Float[T, "BL"],
+		seq_pred: Float[T, "BL"],
+		seq_true: Float[T, "BL"],
+		struct_logits: Float[T, "BL"],
+		struct_head: Any,
+		coords: Float[T, "BL 14 3"],
+		cu_seqlens: Int[T, "B+1"],
+		atom_mask: Bool[T, "BL, 14"],
 	) -> Dict[str, torch.Tensor]:
 
 		# latent loss
@@ -221,7 +224,7 @@ class LossFn:
 
 		return losses
 
-	def diffusion(self, pred: torch.Tensor, trgt: torch.Tensor) -> torch.Tensor:
+	def diffusion(self, pred: torch.Tensor, trgt: torch.Tensor) -> Dict[str, torch.Tensor]:
 		mse = self.mse(pred, trgt)
 		losses = {"diffusion_mse": mse}
 		return losses
@@ -235,7 +238,7 @@ class LossFn:
 		mse = squared_err.sum() / torch.tensor(pred.shape[1:], device=pred.device).prod()
 		return mse
 
-	def seq_loss(self, seq_pred: torch.Tensor, seq_true: torch.Tensor) -> torch.Tensor:
+	def seq_loss(self, seq_pred: torch.Tensor, seq_true: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 		cel = self.seq_cel(seq_pred, seq_true)
 		matches = self.compute_matches(seq_pred, seq_true)
 		probs = self.compute_probs(seq_pred, seq_true)

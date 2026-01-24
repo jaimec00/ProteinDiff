@@ -4,7 +4,7 @@ from torch.utils.data import get_worker_info
 from torch.nn.utils.rnn import pad_sequence
 import torch
 
-from typing import List, Dict, Tuple, Generator
+from typing import List, Dict, Tuple, Generator, Optional, Any
 from bisect import insort
 from pathlib import Path
 from dataclasses import dataclass
@@ -43,14 +43,14 @@ class PDBDataCfg:
 	asymmetric_units_only: bool = False
 
 class Sampler:
-	def __init__(self, clusters_df: pd.DataFrame, cfg: SamplerCfg, epoch) -> None:
-		self._base_seed = cfg.seed
-		self._epoch = epoch
-		self._big_prime = 1_000_003
+	def __init__(self, clusters_df: pd.DataFrame, cfg: SamplerCfg, epoch: Any) -> None:
+		self._base_seed: int = cfg.seed
+		self._epoch: Any = epoch
+		self._big_prime: int = 1_000_003
 
 		# init the df w/ cluster info
-		self._clusters_df = clusters_df
-		self._num_clusters = min(cfg.num_clusters if cfg.num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
+		self._clusters_df: pd.DataFrame = clusters_df
+		self._num_clusters: int = min(cfg.num_clusters if cfg.num_clusters!=-1 else float("inf"), len(clusters_df.CLUSTER.drop_duplicates()))
 
 	def _get_rand_state(self, rng: np.random.Generator) -> int:
 		return int(rng.integers(0, 2**32 - 1, dtype=np.uint32))
@@ -92,13 +92,13 @@ class BatchBuilder:
 	def __init__(self, cfg: BatchBuilderCfg) -> None:
 
 		# init buffer, batch, and token count
-		self._buffer = []
-		self._cur_batch = []
-		self._cur_tokens = 0
-		self._buffer_size = cfg.buffer_size
-		self._batch_tokens = cfg.batch_tokens
+		self._buffer: List[Assembly] = []
+		self._cur_batch: List[Assembly] = []
+		self._cur_tokens: int = 0
+		self._buffer_size: int = cfg.buffer_size
+		self._batch_tokens: int = cfg.batch_tokens
 
-	def add_sample(self, sample: Assembly) -> Generator[DataBatch]:
+	def add_sample(self, sample: Assembly) -> Generator[DataBatch, None, None]:
 		
 		self._add_buffer(sample)
 
@@ -108,7 +108,7 @@ class BatchBuilder:
 				self._clear_batch()
 			self._add_batch()
 
-	def drain_buffer(self) -> Generator[DataBatch]:
+	def drain_buffer(self) -> Generator[DataBatch, None, None]:
 
 		# all assemblies have been batched or in buffer, empty the buffer
 		while self._buffer:
@@ -149,7 +149,6 @@ class DataBatch:
 
 		seq_idx = []
 		chain_idx = []
-		sample_idx = []
 
 		atom_mask = []
 		trgt_mask = []
@@ -159,92 +158,96 @@ class DataBatch:
 			raise ValueError
 
 		for idx, asmb in enumerate(batch_list):
-			
-			asmb.construct() # materialize the full tensors (including AU copies)
+			asmb.construct()  # materialize the full tensors (including AU copies)
 
-			coords.append(asmb.coords)
-			labels.append(asmb.labels)
+			coords.append(asmb.coords)  # (N_i, 14, 3)
+			labels.append(asmb.labels)  # (N_i,)
+			seq_idx.append(asmb.seq_idx)  # (N_i,)
+			chain_idx.append(asmb.chain_idx)  # (N_i,)
+			atom_mask.append(asmb.atom_mask)  # (N_i, 14)
+			trgt_mask.append(asmb.trgt_mask)  # (N_i,)
+			homo_mask.append(asmb.homo_mask)  # (N_i,)
 
-			seq_idx.append(asmb.seq_idx)
-			chain_idx.append(asmb.chain_idx)
-			sample_idx.append(torch.full(asmb.labels.shape, idx))
+		# Use pad_sequence to create padded tensors (B, L, ...)
+		self.coords = pad_sequence(coords, batch_first=True, padding_value=0.0)  # (B, L, 14, 3)
+		self.labels = pad_sequence(labels, batch_first=True, padding_value=-1)  # (B, L)
+		self.seq_idx = pad_sequence(seq_idx, batch_first=True, padding_value=0)  # (B, L)
+		self.chain_idx = pad_sequence(chain_idx, batch_first=True, padding_value=0)  # (B, L)
+		self.atom_mask = pad_sequence(atom_mask, batch_first=True, padding_value=False)  # (B, L, 14)
+		self.trgt_mask = pad_sequence(trgt_mask, batch_first=True, padding_value=False)  # (B, L)
+		self.homo_mask = pad_sequence(homo_mask, batch_first=True, padding_value=False)  # (B, L)
 
-			atom_mask.append(asmb.atom_mask)
-			trgt_mask.append(asmb.trgt_mask)
-			homo_mask.append(asmb.homo_mask)
+		# Create pad_mask (B, L) - True=valid, False=padded
+		seqlens = torch.tensor([len(l) for l in labels], dtype=torch.long)
+		max_seqlen = seqlens.max().item()
+		self.pad_mask = torch.arange(max_seqlen)[None, :] < seqlens[:, None]  # (B, L)
 
-		# no padding, just keep track of sample idxs
-		self.coords = torch.cat(coords, dim=0) # ZN x 14 x 3
-		self.labels = torch.cat(labels, dim=0) # ZN
+		# Compute other masks (B, L)
+		self.coords_mask = self.atom_mask[..., :3].all(dim=-1)  # (B, L)
+		self.caa_mask = self.labels != aa_2_lbl("X")  # (B, L)
+		self.valid_mask = self.coords_mask & self.caa_mask & self.pad_mask  # (B, L)
 
-		self.seq_idx = torch.cat(seq_idx, dim=0)# ZN
-		self.chain_idx = torch.cat(chain_idx, dim=0)# ZN
-		self.sample_idx = torch.cat(sample_idx, dim=0) # ZN
-		
-		self.atom_mask = torch.cat(atom_mask, dim=0)# ZN x 14
-
-		# not used, i dont think i need these anymore
-		self.trgt_mask = torch.cat(trgt_mask, dim=0)# ZN
-		self.homo_mask = torch.cat(homo_mask, dim=0)# ZN
-		
-		# other useful masks
-		self.coords_mask = self.atom_mask[:, :3].all(dim=-1) # means not missing any bb coords, ZN
-		self.caa_mask = self.labels!=aa_2_lbl("X") # non canonical amino acids, ZN
-		self.valid_mask = self.coords_mask & self.caa_mask
 		if not self.valid_mask.any():
-			print(f"Empty batch! coords_mask: {self.coords_mask.sum()}, caa_mask: {self.caa_mask.sum()}")                                                             
-			for idx, asmb in enumerate(batch_list):                                         
-				print(f"  asmb {idx}: {getattr(asmb, 'pdb_id', 'unknown')}")            
-						
-		self.apply_mask(self.valid_mask)
+			print(f"Empty batch! coords_mask: {self.coords_mask.sum()}, caa_mask: {self.caa_mask.sum()}")
+			for idx, asmb in enumerate(batch_list):
+				print(f"  asmb {idx}: {getattr(asmb, 'pdb_id', 'unknown')}")
+
+		# Apply validity filtering
+		self.apply_mask_batch(self.valid_mask)
+
+		# Compute cu_seqlens from final pad_mask
+		self.seqlens = self.pad_mask.sum(dim=1)  # (B,)
+		self.cu_seqlens = torch.nn.functional.pad(
+			self.seqlens.cumsum(dim=0), (1, 0), value=0
+		).to(torch.int32)
+		self.max_seqlen = self.seqlens.max().item()
 		
-	@torch.no_grad
-	def set_cu_seqlens(self):
-
-		_, self.seqlens = torch.unique_consecutive(self.sample_idx, return_counts=True)
-		self.cu_seqlens = torch.nn.functional.pad(self.seqlens.cumsum(dim=0), (1,0), value=0).to(torch.int32)
-		self.max_seqlen = self.seqlens.max(dim=0).values.item()
-
 	@torch.no_grad()
-	def apply_mask(self, mask: torch.Tensor) -> None:
-		self.coords = self.coords[mask, :, :]
-		self.labels = self.labels[mask]
-		self.seq_idx = self.seq_idx[mask]
-		self.chain_idx = self.chain_idx[mask]
-		self.sample_idx = self.sample_idx[mask]
-		self.atom_mask = self.atom_mask[mask, :]
-		self.trgt_mask = self.trgt_mask[mask]
-		self.homo_mask = self.homo_mask[mask]
-		self.coords_mask = self.coords_mask[mask]
-		self.caa_mask = self.caa_mask[mask]
-		self.valid_mask = self.valid_mask[mask]
-		self.set_cu_seqlens()
+	def apply_mask_batch(self, mask: torch.Tensor) -> None:
+		"""Filter invalid positions by updating pad_mask."""
+		# Update pad_mask to exclude invalid positions
+		self.pad_mask = self.pad_mask & mask
 
-	def move_to(self, device: torch.device):
+		# Remove samples with no valid residues
+		valid_samples = self.pad_mask.any(dim=1)
+		if not valid_samples.all():
+			self.coords = self.coords[valid_samples]
+			self.labels = self.labels[valid_samples]
+			self.seq_idx = self.seq_idx[valid_samples]
+			self.chain_idx = self.chain_idx[valid_samples]
+			self.atom_mask = self.atom_mask[valid_samples]
+			self.trgt_mask = self.trgt_mask[valid_samples]
+			self.homo_mask = self.homo_mask[valid_samples]
+			self.coords_mask = self.coords_mask[valid_samples]
+			self.caa_mask = self.caa_mask[valid_samples]
+			self.valid_mask = self.valid_mask[valid_samples]
+			self.pad_mask = self.pad_mask[valid_samples]
+
+	def move_to(self, device: torch.device) -> None:
 		self.coords = self.coords.to(device)
 		self.labels = self.labels.to(device)
 		self.seq_idx = self.seq_idx.to(device)
 		self.chain_idx = self.chain_idx.to(device)
-		self.sample_idx = self.sample_idx.to(device)
 		self.atom_mask = self.atom_mask.to(device)
 		self.trgt_mask = self.trgt_mask.to(device)
 		self.homo_mask = self.homo_mask.to(device)
 		self.coords_mask = self.coords_mask.to(device)
-		self.caa_mask = self.caa_mask.to(device)		
+		self.caa_mask = self.caa_mask.to(device)
+		self.pad_mask = self.pad_mask.to(device)
 		self.seqlens = self.seqlens.to(device)
 		self.cu_seqlens = self.cu_seqlens.to(device)
 
 	@property
-	def samples(self):
+	def samples(self) -> int:
 		return self.seqlens.size(0)
 
-	def __len__(self):
+	def __len__(self) -> int:
 		return self.labels.size(0)
 
 class PDBCache:
-	def __init__(self, cfg: PDBCacheCfg) -> None: 
-		self._cache = {} # {pdb: pdb_data}
-		self._cfg = cfg
+	def __init__(self, cfg: PDBCacheCfg) -> None:
+		self._cache: Dict[str, PDBData] = {} # {pdb: pdb_data}
+		self._cfg: PDBCacheCfg = cfg
 
 	def _add_pdb(self, pdb: str) -> None:
 		self._cache[pdb] = PDBData(PDBDataCfg(
@@ -265,23 +268,23 @@ class PDBData:
 	def __init__(self, cfg: PDBDataCfg) -> None:
 
 		# load the metadata
-		self._base_path = cfg.pdb_path / Path(cfg.pdb[1:3])
-		self._pdb = cfg.pdb
-		metadata = torch.load(self._base_path / Path(self._pdb + ".pt"), weights_only=True, map_location="cpu")
+		self._base_path: Path = cfg.pdb_path / Path(cfg.pdb[1:3])
+		self._pdb: str = cfg.pdb
+		metadata: Dict[str, Any] = torch.load(self._base_path / Path(self._pdb + ".pt"), weights_only=True, map_location="cpu")
 
 		# remove any keys not used (most is just pdb metadata), convert to np if possible
-		removed_keys = {"method", "date", "resolution", "id", "asmb_details", "asmb_method", "asmb_ids"}
-		self._metadata = {key: (metadata[key].numpy() if isinstance(metadata[key], torch.Tensor) else metadata[key]) for key in metadata.keys() if key not in removed_keys}
+		removed_keys: set = {"method", "date", "resolution", "id", "asmb_details", "asmb_method", "asmb_ids"}
+		self._metadata: Dict[str, Any] = {key: (metadata[key].numpy() if isinstance(metadata[key], torch.Tensor) else metadata[key]) for key in metadata.keys() if key not in removed_keys}
 
 		# change this to a dict instead of list
 		self._metadata["chains"] = {c: i for i, c in enumerate(self._metadata["chains"])}
 
 		# other stuff
-		self._chain_cache = {} # {chain: chain_data}
-		self._min_seq_size = cfg.min_seq_size
-		self._max_seq_size = cfg.max_seq_size
-		self._homo_thresh = cfg.homo_thresh
-		self._asymmetric_units_only = cfg.asymmetric_units_only
+		self._chain_cache: Dict[str, Optional[Dict[str, Any]]] = {} # {chain: chain_data}
+		self._min_seq_size: int = cfg.min_seq_size
+		self._max_seq_size: int = cfg.max_seq_size
+		self._homo_thresh: float = cfg.homo_thresh
+		self._asymmetric_units_only: bool = cfg.asymmetric_units_only
 
 	def sample_asmb(self, chain: str) -> Assembly:
 		
@@ -343,7 +346,7 @@ class PDBData:
 
 		return asmb
 
-	def _get_chain(self, chain: str) -> Dict[str, np.ndarray | List[int]]:
+	def _get_chain(self, chain: str) -> Optional[Dict[str, Any]]:
 
 		# add chain to cache if not in there
 		if chain not in self._chain_cache:
@@ -390,15 +393,15 @@ class Assembly:
 						asmb_xform: np.ndarray, max_seq_size: int
 					) -> None:
 
-		self.coords = coords
-		self.labels = labels
-		self.atom_mask = atom_mask
+		self.coords: Any = coords  # np.ndarray or torch.Tensor after construct()
+		self.labels: Any = labels  # np.ndarray or torch.Tensor after construct()
+		self.atom_mask: Any = atom_mask  # np.ndarray or torch.Tensor after construct()
 
-		self._chain_info = chain_info
-		self._trgt_chain = trgt_chain
-		self._homo_chains = homo_chains
-		
-		self.asmb_xform = asmb_xform
+		self._chain_info: List[Tuple[int, int]] = chain_info
+		self._trgt_chain: int = trgt_chain
+		self._homo_chains: np.ndarray = homo_chains
+
+		self.asmb_xform: Any = asmb_xform  # np.ndarray or torch.Tensor after construct()
 
 		self._crop(max_seq_size)
 

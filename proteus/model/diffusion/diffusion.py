@@ -37,28 +37,28 @@ class DiffusionModel(Base):
 	
 	def forward(
 		self,
-		latent: Float[T, "ZN d_latent"],
-		seq: Int[T, "ZN"],
-		coords_bb: Float[T, "ZN 4 3"],
-		frames: Float[T, "ZN 3 3"],
-		seq_idx: Int[T, "ZN"],
-		chain_idx: Int[T, "ZN"],
-		sample_idx: Int[T, "ZN"],
-		t: Int[T, "ZN"],
-		cu_seqlens: Int[T, "Z+1"],
+		latent: Float[T, "BL d_latent"],
+		seq: Int[T, "BL"],
+		coords_bb: Float[T, "BL 4 3"],
+		frames: Float[T, "BL 3 3"],
+		seq_idx: Int[T, "BL"],
+		chain_idx: Int[T, "BL"],
+		sample_idx: Int[T, "BL"],
+		t: Int[T, "BL"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-	) -> Float[T, "ZN d_latent"]:
+	) -> Float[T, "BL d_latent"]:
 
 		conditioning = self.conditioner(seq, coords_bb, frames, seq_idx, chain_idx, sample_idx, t, cu_seqlens, max_seqlen)
 		return self.denoise(latent, conditioning, cu_seqlens, max_seqlen)
 
 	def denoise(
 		self,
-		latent: Float[T, "ZN d_latent"],
-		conditioning: Float[T, "ZN d_model"],
-		cu_seqlens: Int[T, "Z+1"],
+		latent: Float[T, "BL d_latent"],
+		conditioning: Float[T, "BL d_model"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-	) -> Float[T, "ZN d_latent"]:
+	) -> Float[T, "BL d_latent"]:
 		latent = self.latent_proj(latent)
 		latent = self.denoiser(latent, conditioning, cu_seqlens, max_seqlen)
 		noise_pred = self.pred_proj(latent)
@@ -67,9 +67,9 @@ class DiffusionModel(Base):
 
 	def noise(
 		self,
-		latent: Float[T, "ZN d_latent"],
-		t: Int[T, "ZN"]
-	) -> tuple[Float[T, "ZN d_latent"], Float[T, "ZN d_latent"]]:
+		latent: Float[T, "BL d_latent"],
+		t: Int[T, "BL"]
+	) -> tuple[Float[T, "BL d_latent"], Float[T, "BL d_latent"]]:
 		abars = self.noise_scheduler.get_abars(t).unsqueeze(-1)
 		noise = torch.randn_like(latent)
 		noised_latent = (abars**0.5)*latent + ((1 - abars)**0.5)*noise
@@ -86,19 +86,19 @@ class DiffusionModel(Base):
 
 	def generate(
 		self,
-		seq: Int[T, "ZN"],
-		coords_bb: Float[T, "ZN 4 3"],
-		frames: Float[T, "ZN 3 3"],
-		seq_idx: Int[T, "ZN"],
-		chain_idx: Int[T, "ZN"],
-		sample_idx: Int[T, "ZN"],
-		cu_seqlens: Int[T, "Z+1"],
+		seq: Int[T, "BL"],
+		coords_bb: Float[T, "BL 4 3"],
+		frames: Float[T, "BL 3 3"],
+		seq_idx: Int[T, "BL"],
+		chain_idx: Int[T, "BL"],
+		sample_idx: Int[T, "BL"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
 		step_size: int = 1,
-	) -> Float[T, "ZN d_latent"]:
+	) -> Float[T, "BL d_latent"]:
 		# prep and start from white noise latents
 		device = seq.device
-		ZN = seq.shape[0]
+		BL = seq.shape[0]
 		seq_coords_condition = self.conditioner.seq_coords_conditioning(
 			seq,
 			coords_bb,
@@ -109,16 +109,16 @@ class DiffusionModel(Base):
 			cu_seqlens,
 			max_seqlen,
 		)
-		latent = torch.randn((ZN, self.d_latent), device=device)
+		latent = torch.randn((BL, self.d_latent), device=device)
 
 		# initialize t
 		t = torch.tensor([self.noise_scheduler.t_max-1], device=device)
 
 		while t.item() >= 0:
-			
+
 			# get conditioning
 			t_condition = self.conditioner.featurize_t(t)
-			condition = self.conditioner.combine_conditioning(seq_coords_condition, t_condition.expand(ZN, -1))
+			condition = self.conditioner.combine_conditioning(seq_coords_condition, t_condition.expand(BL, -1))
 
 			# predict noise
 			pred = self.denoise(latent, condition, cu_seqlens, max_seqlen)
@@ -133,11 +133,11 @@ class DiffusionModel(Base):
 
 	def nudge(
 		self,
-		latent: Float[T, "ZN d_latent"],
-		pred: Float[T, "ZN d_latent"],
+		latent: Float[T, "BL d_latent"],
+		pred: Float[T, "BL d_latent"],
 		t: Int[T, "..."],
 		step_size: int = 1
-	) -> Float[T, "ZN d_latent"]: 
+	) -> Float[T, "BL d_latent"]: 
 		'''
 		uses DDIM
 		'''
@@ -164,5 +164,5 @@ class DiffusionModel(Base):
 
 		return latent_tminus_step
 
-	def get_rand_t_for(self, x: Float[T, "ZN ..."]) -> Int[T, "ZN"]:
+	def get_rand_t_for(self, x: Float[T, "BL ..."]) -> Int[T, "BL"]:
 		return torch.randint(0, self.noise_scheduler.t_max, (x.size(0),), device=x.device)

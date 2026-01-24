@@ -8,6 +8,7 @@ from proteus.model.base import Base
 from proteus.static.constants import amber_partial_charges, aa_2_lbl
 from proteus.types import Tuple, Float, Int, Bool, T
 from proteus.utils.struct_utils import get_backbone, compute_frames
+from proteus.utils.tensor import unpad, repad
 
 @dataclass
 class TokenizerCfg:
@@ -19,77 +20,94 @@ class Tokenizer(Base):
 	def __init__(self, cfg: TokenizerCfg) -> None:
 		super().__init__()
 
-		voxel_dims = (cfg.voxel_dim,)*3
+		voxel_dims: Tuple[int, int, int] = (cfg.voxel_dim,)*3
+		x_cells: int
+		y_cells: int
+		z_cells: int
 		x_cells, y_cells, z_cells = voxel_dims
-		voxel_x = torch.arange(x_cells, dtype=torch.float32).reshape(-1,1,1).expand(voxel_dims) - x_cells/2
-		voxel_y = torch.arange(y_cells, dtype=torch.float32).reshape(1,-1,1).expand(voxel_dims) - y_cells/4 # more cells in positive y direction, since that is where the side chain is located
-		voxel_z = torch.arange(z_cells, dtype=torch.float32).reshape(1,1,-1).expand(voxel_dims) - z_cells/2
-		voxel = cfg.cell_dim * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
+		voxel_x: T = torch.arange(x_cells, dtype=torch.float32).reshape(-1,1,1).expand(voxel_dims) - x_cells/2
+		voxel_y: T = torch.arange(y_cells, dtype=torch.float32).reshape(1,-1,1).expand(voxel_dims) - y_cells/4 # more cells in positive y direction, since that is where the side chain is located
+		voxel_z: T = torch.arange(z_cells, dtype=torch.float32).reshape(1,1,-1).expand(voxel_dims) - z_cells/2
+		voxel: T = cfg.cell_dim * torch.stack([voxel_x, voxel_y, voxel_z], dim=3) # Vx, Vy, Vz, 3
 		self.register_buffer("voxel", voxel)
 		self.register_buffer("amber_partial_charges", torch.from_numpy(amber_partial_charges).to(torch.float32))
-		self.res = cfg.cell_dim
+		self.res: float = cfg.cell_dim
 
 	@torch.no_grad()
 	def forward(
 		self,
-		C: Float[T, "ZN 14 3"],
-		L: Int[T, "ZN"],
-		atom_mask: Bool[T, "ZN 14"]
-	) -> Tuple[Float[T, "ZN 4 3"], Int[T, "ZN 1 Vx Vy Vz"], Float[T, "ZN 3 3"]]:
+		C: Float[T, "B L 14 3"],
+		L: Int[T, "B L"],
+		atom_mask: Bool[T, "B L 14"],
+		pad_mask: Bool[T, "B L"]
+	) -> Tuple[Float[T, "B L 4 3"], Float[T, "B L 1 Vx Vy Vz"], Float[T, "B L 3 3"]]:
 		'''
-		C (torch.Tensor): full atomic coordinates of shape (ZN,A,3)
-		L (torch.Tensor): amino acid class labels of shape (ZN)
-		atom_mask (torch.Tensor): mask indicating missing atom coordinates of shape (ZN,A)
+		C (torch.Tensor): full atomic coordinates of shape (B,L,A,3)
+		L (torch.Tensor): amino acid class labels of shape (B,L)
+		atom_mask (torch.Tensor): mask indicating missing atom coordinates of shape (B,L,A)
+		pad_mask (torch.Tensor): mask indicating valid vs padded positions of shape (B,L)
 		'''
+
+		# Unpad inputs to BL format
+		[C_u, L_u, atom_mask_u], cu_seqlens, max_seqlen = unpad(
+			C, L, atom_mask, pad_mask=pad_mask
+		)
 
 		# get the backbone atoms, using virtual Cb
-		C_backbone = get_backbone(C) # ZN,4,3
+		C_backbone = get_backbone(C_u) # BL,4,3
 
 		# compute unit vectors for each residue's local reference frame
-		local_origins, local_frames = compute_frames(C_backbone) # ZN,3 and ZN,3,3
+		local_origins, local_frames = compute_frames(C_backbone) # BL,3 and BL,3,3
 
-		# create the voxel for each residue by rotating the base voxel to the local frame and translating to local origin, 
+		# create the voxel for each residue by rotating the base voxel to the local frame and translating to local origin,
 		# simply contains the coordinates for the voxels
-		local_voxels = self.compute_voxels(local_origins, local_frames) # ZN,Vx,Vy,Vz,3
+		local_voxels = self.compute_voxels(local_origins, local_frames) # BL,Vx,Vy,Vz,3
 
-		# compute electric fields 
-		fields = self.compute_fields(C, L, local_voxels, atom_mask) # ZN,Vx,Vy,Vz,3
+		# compute electric fields
+		fields = self.compute_fields(C_u, L_u, local_voxels, atom_mask_u) # BL,Vx,Vy,Vz,3
 
 		# compute divergence of the normed fields, hoping this is easier for diffusion
-		divergence = self.compute_divergence(fields) # ZN,1,Vx,Vy,Vz
+		divergence = self.compute_divergence(fields) # BL,1,Vx,Vy,Vz
 
-		return C_backbone, divergence, local_frames
+		# Repad outputs to B,L format
+		[C_bb_padded, divergence_padded, frames_padded] = repad(
+			C_backbone, divergence, local_frames,
+			cu_seqlens=cu_seqlens,
+			max_seqlen=max_seqlen
+		)
+
+		return C_bb_padded, divergence_padded, frames_padded
 
 	@torch.no_grad()
 	def compute_voxels(
 		self,
-		origins: Float[T, "ZN 3"],
-		frames: Float[T, "ZN 3 3"]
-	) -> Float[T, "ZN Vx Vy Vz 3"]:
+		origins: Float[T, "BL 3"],
+		frames: Float[T, "BL 3 3"]
+	) -> Float[T, "BL Vx Vy Vz 3"]:
 
-		ZN, S = origins.shape
+		BL, S = origins.shape
 		_, U, _ = frames.shape # U is the unit vectors dim
 		Vx, Vy, Vz, _ = self.voxel.shape
 
 		# rotate the voxel grid using the local frames, each unit vector (Uxyz) is multipled by the corresponding component and summed across U dim
-		rotation = torch.sum(frames.reshape(ZN,1,1,1,U,S) * self.voxel.reshape(1,Vx,Vy,Vz,S,1), dim=4) # ZN,Vx,Vy,Vz,U
+		rotation = torch.sum(frames.reshape(BL,1,1,1,U,S) * self.voxel.reshape(1,Vx,Vy,Vz,S,1), dim=4) # BL,Vx,Vy,Vz,U
 
 		# add the offset so the origin is the beta carbon
-		local_voxels = origins.reshape(ZN,1,1,1,S) + rotation # ZN,Vx,Vy,Vz,S
+		local_voxels = origins.reshape(BL,1,1,1,S) + rotation # BL,Vx,Vy,Vz,S
 
 		return local_voxels
 		
 	@torch.no_grad()
 	def compute_fields(
 		self,
-		C: Float[T, "ZN 14 3"],
-		L: Int[T, "ZN"],
-		voxels: Float[T, "ZN Vx Vy Vz 3"],
-		atom_mask: Bool[T, "ZN 14"]
-	) -> Float[T, "ZN 3 Vx Vy Vz"]:
+		C: Float[T, "BL 14 3"],
+		L: Int[T, "BL"],
+		voxels: Float[T, "BL Vx Vy Vz 3"],
+		atom_mask: Bool[T, "BL 14"]
+	) -> Float[T, "BL 3 Vx Vy Vz"]:
 
 		# prep
-		ZN = L.size(0)
+		BL = L.size(0)
 		AA, A = self.amber_partial_charges.shape
 		_, Vx, Vy, Vz, S = voxels.shape
 
@@ -99,35 +117,35 @@ class Tokenizer(Base):
 		# compute the electric field, using just basic point charge formula
 
 		# now get distance vectors, as directionality is also used. points from atoms TO voxel cells
-		dist_vectors =  voxels.reshape(ZN, Vx, Vy, Vz, 1, S) - C.reshape(ZN, 1, 1, 1, A, S) # ZN,Vx,Vy,Vz,A,S
+		dist_vectors =  voxels.reshape(BL, Vx, Vy, Vz, 1, S) - C.reshape(BL, 1, 1, 1, A, S) # BL,Vx,Vy,Vz,A,S
 
 		# compute magnitudes
-		dists = torch.linalg.vector_norm(dist_vectors, dim=-1, keepdim=True) # ZN,Vx,Vy,Vz,A,1
+		dists = torch.linalg.vector_norm(dist_vectors, dim=-1, keepdim=True) # BL,Vx,Vy,Vz,A,1
 
 		# the distance term is the r^{hat} / |r|^2 = r / |r|^3. first dist is to make into unit vector, dist**2 is clamped to the cell resolution to avoid singularities
 		dists.masked_fill_(dists==0, 1)
 		dists_clamped = dists.clamp_(min=self.res)
-		dist_term = dist_vectors / (dists * (dists_clamped**2)) # ZN,Vx,Vy,Vz,A,S
+		dist_term = dist_vectors / (dists * (dists_clamped**2)) # BL,Vx,Vy,Vz,A,S
 
 		# get partial charges, zero out masked atoms
-		partial_charges = self.amber_partial_charges[L].reshape(ZN, A) * atom_mask # ZN, A
+		partial_charges = self.amber_partial_charges[L].reshape(BL, A) * atom_mask # BL, A
 
 		# now compute the final field, sum over atoms.
 		# no coulomb constant, since scaling to unit vector anyways
-		fields = torch.sum(partial_charges.reshape(ZN, 1, 1, 1, A, 1) * dist_term, dim=4) # ZN,Vx,Vy,Vz,S
+		fields = torch.sum(partial_charges.reshape(BL, 1, 1, 1, A, 1) * dist_term, dim=4) # BL,Vx,Vy,Vz,S
 
 		# decidied to norm to unit vectors, thus the models job is to nudge them towards the true direction
 		# also works well with latent diffusion, as the compression makes sense, since there is redundancy due to continuous nature
 		fields_norm = torch.linalg.vector_norm(fields, dim=-1, keepdim=True)
 		fields.div_(fields_norm.masked_fill(fields_norm==0, 1))
 
-		# now reshape to ZN,S,Vx,Vy,Vz to be compatible with conv operatinos later
+		# now reshape to BL,S,Vx,Vy,Vz to be compatible with conv operatinos later
 		fields = fields.permute(0,4,1,2,3)
 
 		return fields
 
 	@torch.no_grad()
-	def compute_divergence(self, fields: Float[T, "ZN 3 Vx Vy Vz"]) -> Int[T, "ZN 1 Vx Vy Vz"]:
+	def compute_divergence(self, fields: Float[T, "BL 3 Vx Vy Vz"]) -> Int[T, "BL 1 Vx Vy Vz"]:
 
 		'''
 		compute divergence of the electric field. field is normed so each cell has unit magnitude

@@ -310,18 +310,18 @@ def frames_to_atom14_pos(
 
 
 def coords_from_txy_sincos(
-    t: Float[T, "ZN 3"],
-    x: Float[T, "ZN 3"],
-    y: Float[T, "ZN 3"],
-    sin: Float[T, "ZN 4"],
-    cos: Float[T, "ZN 4"],
-    labels: Int[T, "ZN"],
+    t: Float[T, "BL 3"],
+    x: Float[T, "BL 3"],
+    y: Float[T, "BL 3"],
+    sin: Float[T, "BL 4"],
+    cos: Float[T, "BL 4"],
+    labels: Int[T, "BL"],
     restype_rigid_group_default_frame: Float[T, "21 8 4 4"],
     restype_atom14_rigid_group_positions: Float[T, "21 14 3"],
     restype_atom14_to_rigid_group: Int[T, "21 14"],
     restype_atom14_mask: Float[T, "21 14"],
     chi_angles_mask: Float[T, "21 4"],
-) -> Tuple[Float[T, "ZN 14 3"], Bool[T, "ZN 14"]]:
+) -> Tuple[Float[T, "BL 14 3"], Bool[T, "BL 14"]]:
     """
     Reconstruct atom14 coordinates from predicted frame vectors and torsion angles.
 

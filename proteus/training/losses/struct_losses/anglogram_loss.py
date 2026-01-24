@@ -1,8 +1,14 @@
-import triton
-import triton.language as tl
 import torch
+from unittest.mock import MagicMock
 
 from proteus.types import Float, Int, T
+
+if torch.cuda.is_available():
+    import triton
+    import triton.language as tl
+else:
+    triton = MagicMock()
+    tl = MagicMock()
 
 # 6 non-redundant dot product pairs: (vec_i_idx, vec_j_idx)
 # unit_vecs = [CaN, CaCb, CaC] indexed as [0, 1, 2]
@@ -24,23 +30,23 @@ def anglogram_loss_fwd_bwd(
     # outputs
     per_token_loss_ptr, d_logits_ptr, d_fc1_ptr, d_fc2_ptr, d_unit_vecs_ptr,
     # shapes
-    ZN, Z, d_in, d_hidden, num_bins,
-    # strides - logits (ZN, 2, d_in)
-    stride_logits_zn, stride_logits_2, stride_logits_d,
+    BL, B, d_in, d_hidden, num_bins,
+    # strides - logits (BL, 2, d_in)
+    stride_logits_bl, stride_logits_2, stride_logits_d,
     # strides - fc1 (d_hidden, 2*d_in)
     stride_fc1_hidden, stride_fc1_in,
     # strides - fc2 (6*num_bins, d_hidden)
     stride_fc2_out, stride_fc2_hidden,
-    # strides - unit_vecs (ZN, 3, 3)
-    stride_vecs_zn, stride_vecs_v, stride_vecs_xyz,
-    # strides - d_logits (ZN, 2, d_in)
-    stride_dlogits_zn, stride_dlogits_2, stride_dlogits_d,
+    # strides - unit_vecs (BL, 3, 3)
+    stride_vecs_bl, stride_vecs_v, stride_vecs_xyz,
+    # strides - d_logits (BL, 2, d_in)
+    stride_dlogits_bl, stride_dlogits_2, stride_dlogits_d,
     # strides - d_fc1 (d_hidden, 2*d_in)
     stride_dfc1_hidden, stride_dfc1_in,
     # strides - d_fc2 (6*num_bins, d_hidden)
     stride_dfc2_out, stride_dfc2_hidden,
-    # strides - d_unit_vecs (ZN, 3, 3)
-    stride_dvecs_zn, stride_dvecs_v, stride_dvecs_xyz,
+    # strides - d_unit_vecs (BL, 3, 3)
+    stride_dvecs_bl, stride_dvecs_v, stride_dvecs_xyz,
     # block sizes
     BLOCK_D: tl.constexpr,
     BLOCK_BINS: tl.constexpr,
@@ -62,7 +68,7 @@ def anglogram_loss_fwd_bwd(
     # find sequence bounds via linear search
     seq_start = 0
     seq_end = 0
-    for s in range(Z):
+    for s in range(B):
         start_s = tl.load(cu_seqlens_ptr + s)
         end_s = tl.load(cu_seqlens_ptr + s + 1)
         if start_s <= pid and pid < end_s:
@@ -123,22 +129,22 @@ def anglogram_loss_fwd_bwd(
     ).to(tl.float32)
 
     # load q[i], k[i] (fp32)
-    qi_ptr = logits_ptr + pid * stride_logits_zn + 0 * stride_logits_2 + offs_d * stride_logits_d
-    ki_ptr = logits_ptr + pid * stride_logits_zn + 1 * stride_logits_2 + offs_d * stride_logits_d
+    qi_ptr = logits_ptr + pid * stride_logits_bl + 0 * stride_logits_2 + offs_d * stride_logits_d
+    ki_ptr = logits_ptr + pid * stride_logits_bl + 1 * stride_logits_2 + offs_d * stride_logits_d
     qi = tl.load(qi_ptr, mask=offs_d < d_in, other=0.0).to(tl.float32)
     ki = tl.load(ki_ptr, mask=offs_d < d_in, other=0.0).to(tl.float32)
 
     # load unit_vecs[i] - 3 vectors: CaN, CaCb, CaC (fp32)
     # unit_vecs: (ZN, 3, 3) where dim1=[CaN,CaCb,CaC], dim2=xyz
-    vi_0_x = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 0 * stride_vecs_v + 0).to(tl.float32)
-    vi_0_y = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 0 * stride_vecs_v + 1).to(tl.float32)
-    vi_0_z = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 0 * stride_vecs_v + 2).to(tl.float32)
-    vi_1_x = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 1 * stride_vecs_v + 0).to(tl.float32)
-    vi_1_y = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 1 * stride_vecs_v + 1).to(tl.float32)
-    vi_1_z = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 1 * stride_vecs_v + 2).to(tl.float32)
-    vi_2_x = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 2 * stride_vecs_v + 0).to(tl.float32)
-    vi_2_y = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 2 * stride_vecs_v + 1).to(tl.float32)
-    vi_2_z = tl.load(unit_vecs_ptr + pid * stride_vecs_zn + 2 * stride_vecs_v + 2).to(tl.float32)
+    vi_0_x = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 0 * stride_vecs_v + 0).to(tl.float32)
+    vi_0_y = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 0 * stride_vecs_v + 1).to(tl.float32)
+    vi_0_z = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 0 * stride_vecs_v + 2).to(tl.float32)
+    vi_1_x = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 1 * stride_vecs_v + 0).to(tl.float32)
+    vi_1_y = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 1 * stride_vecs_v + 1).to(tl.float32)
+    vi_1_z = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 1 * stride_vecs_v + 2).to(tl.float32)
+    vi_2_x = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 2 * stride_vecs_v + 0).to(tl.float32)
+    vi_2_y = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 2 * stride_vecs_v + 1).to(tl.float32)
+    vi_2_z = tl.load(unit_vecs_ptr + pid * stride_vecs_bl + 2 * stride_vecs_v + 2).to(tl.float32)
 
     # accumulators (all fp32)
     loss_acc = 0.0
@@ -163,21 +169,21 @@ def anglogram_loss_fwd_bwd(
         valid = True
 
         # load q[j], k[j] (fp32)
-        qj_ptr = logits_ptr + j * stride_logits_zn + 0 * stride_logits_2 + offs_d * stride_logits_d
-        kj_ptr = logits_ptr + j * stride_logits_zn + 1 * stride_logits_2 + offs_d * stride_logits_d
+        qj_ptr = logits_ptr + j * stride_logits_bl + 0 * stride_logits_2 + offs_d * stride_logits_d
+        kj_ptr = logits_ptr + j * stride_logits_bl + 1 * stride_logits_2 + offs_d * stride_logits_d
         qj = tl.load(qj_ptr, mask=d_mask, other=0.0).to(tl.float32)
         kj = tl.load(kj_ptr, mask=d_mask, other=0.0).to(tl.float32)
 
         # load unit_vecs[j] - 3 vectors (fp32)
-        vj_0_x = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 0 * stride_vecs_v + 0).to(tl.float32)
-        vj_0_y = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 0 * stride_vecs_v + 1).to(tl.float32)
-        vj_0_z = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 0 * stride_vecs_v + 2).to(tl.float32)
-        vj_1_x = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 1 * stride_vecs_v + 0).to(tl.float32)
-        vj_1_y = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 1 * stride_vecs_v + 1).to(tl.float32)
-        vj_1_z = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 1 * stride_vecs_v + 2).to(tl.float32)
-        vj_2_x = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 2 * stride_vecs_v + 0).to(tl.float32)
-        vj_2_y = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 2 * stride_vecs_v + 1).to(tl.float32)
-        vj_2_z = tl.load(unit_vecs_ptr + j * stride_vecs_zn + 2 * stride_vecs_v + 2).to(tl.float32)
+        vj_0_x = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 0 * stride_vecs_v + 0).to(tl.float32)
+        vj_0_y = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 0 * stride_vecs_v + 1).to(tl.float32)
+        vj_0_z = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 0 * stride_vecs_v + 2).to(tl.float32)
+        vj_1_x = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 1 * stride_vecs_v + 0).to(tl.float32)
+        vj_1_y = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 1 * stride_vecs_v + 1).to(tl.float32)
+        vj_1_z = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 1 * stride_vecs_v + 2).to(tl.float32)
+        vj_2_x = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 2 * stride_vecs_v + 0).to(tl.float32)
+        vj_2_y = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 2 * stride_vecs_v + 1).to(tl.float32)
+        vj_2_z = tl.load(unit_vecs_ptr + j * stride_vecs_bl + 2 * stride_vecs_v + 2).to(tl.float32)
 
         # compute 6 non-redundant dot products
         dot_0 = vi_0_x * vj_0_x + vi_0_y * vj_0_y + vi_0_z * vj_0_z  # (0,0) CaN·CaN
@@ -352,7 +358,7 @@ def anglogram_loss_fwd_bwd(
         d_fc1_second_acc += tl.where(valid, d_fc1_second_local, 0.0)
 
         # atomic add d_kj to d_logits[j, 1, :] (normalized by inv_n_pairs)
-        d_kj_ptr = d_logits_ptr + j * stride_dlogits_zn + 1 * stride_dlogits_2 + offs_d * stride_dlogits_d
+        d_kj_ptr = d_logits_ptr + j * stride_dlogits_bl + 1 * stride_dlogits_2 + offs_d * stride_dlogits_d
         d_kj_norm = tl.where(valid, d_kj_local * inv_n_pairs, 0.0)
         tl.atomic_add(d_kj_ptr, d_kj_norm, mask=d_mask)
 
@@ -372,7 +378,7 @@ def anglogram_loss_fwd_bwd(
     tl.store(per_token_loss_ptr + pid, loss_acc)
 
     # atomic add d_qi to d_logits[i, 0, :]
-    d_qi_ptr = d_logits_ptr + pid * stride_dlogits_zn + 0 * stride_dlogits_2 + offs_d * stride_dlogits_d
+    d_qi_ptr = d_logits_ptr + pid * stride_dlogits_bl + 0 * stride_dlogits_2 + offs_d * stride_dlogits_d
     tl.atomic_add(d_qi_ptr, d_qi_acc, mask=d_mask)
 
     # atomic add d_fc1 (first half: cols 0..d_in-1, second half: cols d_in..2*d_in-1)
@@ -399,11 +405,11 @@ def anglogram_loss_fwd_bwd(
 
 
 def anglogram_loss(
-    logits: Float[T, "ZN 2 d_in"],
+    logits: Float[T, "BL 2 d_in"],
     fc1: Float[T, "d_hidden 2*d_in"],
     fc2: Float[T, "6*num_bins d_hidden"],
-    unit_vecs: Float[T, "ZN 3 3"],
-    cu_seqlens: Int[T, "Z+1"],
+    unit_vecs: Float[T, "BL 3 3"],
+    cu_seqlens: Int[T, "B+1"],
 ) -> Float[T, "1"]:
     return AnglogramLoss.apply(logits, fc1, fc2, unit_vecs, cu_seqlens)
 
@@ -413,26 +419,26 @@ class AnglogramLoss(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        logits: Float[T, "ZN 2 d_in"],
+        logits: Float[T, "BL 2 d_in"],
         fc1: Float[T, "d_hidden 2*d_in"],
         fc2: Float[T, "6*num_bins d_hidden"],
-        unit_vecs: Float[T, "ZN 3 3"],
-        cu_seqlens: Int[T, "Z+1"],
+        unit_vecs: Float[T, "BL 3 3"],
+        cu_seqlens: Int[T, "B+1"],
     ) -> Float[T, "1"]:
         # shapes
-        ZN, _, d_in = logits.shape
+        BL, _, d_in = logits.shape
         d_hidden, _ = fc1.shape
         d_out, _ = fc2.shape
         num_bins = d_out // 6
-        Z = cu_seqlens.shape[0] - 1
+        B = cu_seqlens.shape[0] - 1
 
         # assertions
-        assert unit_vecs.shape == (ZN, 3, 3), f"unit_vecs {unit_vecs.shape} != ({ZN}, 3, 3)"
-        assert logits.shape == (ZN, 2, d_in), f"logits {logits.shape} != ({ZN}, 2, {d_in})"
+        assert unit_vecs.shape == (BL, 3, 3), f"unit_vecs {unit_vecs.shape} != ({BL}, 3, 3)"
+        assert logits.shape == (BL, 2, d_in), f"logits {logits.shape} != ({BL}, 2, {d_in})"
         assert fc1.shape == (d_hidden, 2 * d_in), f"fc1 {fc1.shape} != ({d_hidden}, {2 * d_in})"
         assert fc2.shape == (d_out, d_hidden), f"fc2 {fc2.shape} != ({d_out}, {d_hidden})"
         assert d_out % 6 == 0, f"fc2 d_out={d_out} must be divisible by 6"
-        assert cu_seqlens.shape == (Z + 1,), f"cu_seqlens {cu_seqlens.shape} != ({Z + 1},)"
+        assert cu_seqlens.shape == (B + 1,), f"cu_seqlens {cu_seqlens.shape} != ({B + 1},)"
         assert unit_vecs.is_cuda and logits.is_cuda and fc1.is_cuda and fc2.is_cuda and cu_seqlens.is_cuda
 
         # get orig dtypes
@@ -449,16 +455,16 @@ class AnglogramLoss(torch.autograd.Function):
         fc2 = fc2.to(torch.float32).contiguous()
 
         # allocate outputs (fp32)
-        per_token_loss = torch.zeros(ZN, device=unit_vecs.device, dtype=torch.float32)
-        d_unit_vecs = torch.zeros(ZN, 3, 3, device=unit_vecs.device, dtype=torch.float32)
-        d_logits = torch.zeros(ZN, 2, d_in, device=unit_vecs.device, dtype=torch.float32)
+        per_token_loss = torch.zeros(BL, device=unit_vecs.device, dtype=torch.float32)
+        d_unit_vecs = torch.zeros(BL, 3, 3, device=unit_vecs.device, dtype=torch.float32)
+        d_logits = torch.zeros(BL, 2, d_in, device=unit_vecs.device, dtype=torch.float32)
         d_fc1 = torch.zeros(d_hidden, 2 * d_in, device=unit_vecs.device, dtype=torch.float32)
         d_fc2 = torch.zeros(d_out, d_hidden, device=unit_vecs.device, dtype=torch.float32)
 
         # block sizes - tl.dot requires K >= 16
         BLOCK_D = max(16, triton.next_power_of_2(max(d_in, d_hidden)))
         BLOCK_BINS = max(16, triton.next_power_of_2(num_bins))
-        grid = (ZN,)
+        grid = (BL,)
 
         # launch kernel
         anglogram_loss_fwd_bwd[grid](
@@ -467,7 +473,7 @@ class AnglogramLoss(torch.autograd.Function):
             # outputs
             per_token_loss, d_logits, d_fc1, d_fc2, d_unit_vecs,
             # shapes
-            ZN, Z, d_in, d_hidden, num_bins,
+            BL, B, d_in, d_hidden, num_bins,
             # strides - logits
             logits.stride(0), logits.stride(1), logits.stride(2),
             # strides - fc1

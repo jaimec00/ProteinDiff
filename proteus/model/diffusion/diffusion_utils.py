@@ -33,11 +33,11 @@ class DiTBlock(Base):
 
 	def forward(
 		self,
-		latent: Float[T, "ZN d_model"],
-		condition: Float[T, "ZN d_model"],
-		cu_seqlens: Int[T, "Z+1"],
+		latent: Float[T, "BL d_model"],
+		condition: Float[T, "BL d_model"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-	) -> Float[T, "ZN d_model"]:
+	) -> Float[T, "BL d_model"]:
 
 		# conditioning
 		gamma1, beta1, alpha1 = self.attn_norm(condition)
@@ -71,11 +71,11 @@ class DiTModel(Base):
 
 	def forward(
 		self,
-		latent: Float[T, "ZN d_model"],
-		condition: Float[T, "ZN d_model"],
-		cu_seqlens: Int[T, "Z+1"],
+		latent: Float[T, "BL d_model"],
+		condition: Float[T, "BL d_model"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-	) -> Float[T, "ZN d_model"]:
+	) -> Float[T, "BL d_model"]:
 		for block in self.dit_blocks:
 			latent = block(latent, condition, cu_seqlens, max_seqlen)
 		return latent
@@ -146,16 +146,16 @@ class Conditioner(Base):
 
 	def forward(
 		self,
-		seq: Int[T, "ZN"],
-		coords_bb: Float[T, "ZN 4 3"],
-		frames: Float[T, "ZN 3 3"],
-		seq_idx: Int[T, "ZN"],
-		chain_idx: Int[T, "ZN"],
-		sample_idx: Int[T, "ZN"],
-		t: Int[T, "ZN"],
-		cu_seqlens: Int[T, "Z+1"],
+		seq: Int[T, "BL"],
+		coords_bb: Float[T, "BL 4 3"],
+		frames: Float[T, "BL 3 3"],
+		seq_idx: Int[T, "BL"],
+		chain_idx: Int[T, "BL"],
+		sample_idx: Int[T, "BL"],
+		t: Int[T, "BL"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-	) -> Float[T, "ZN d_model"]:
+	) -> Float[T, "BL d_model"]:
 
 		seq_coords_conditioning = self.seq_coords_conditioning(
 			seq,
@@ -173,28 +173,28 @@ class Conditioner(Base):
 
 	def combine_conditioning(
 		self,
-		seq_coords_conditioning: Float[T, "ZN d_conditioning"],
-		t_conditioning: Float[T, "ZN d_conditioning"]
-	) -> Float[T, "ZN d_model"]:
+		seq_coords_conditioning: Float[T, "BL d_conditioning"],
+		t_conditioning: Float[T, "BL d_conditioning"]
+	) -> Float[T, "BL d_model"]:
 		return self.condition_proj(torch.cat([seq_coords_conditioning, t_conditioning], dim=-1))
 
 	def seq_coords_conditioning(
 		self,
-		seq: Int[T, "ZN"],
-		coords_bb: Float[T, "ZN 4 3"],
-		frames: Float[T, "ZN 3 3"],
-		seq_idx: Int[T, "ZN"],
-		chain_idx: Int[T, "ZN"],
-		sample_idx: Int[T, "ZN"],
-		cu_seqlens: Int[T, "Z+1"],
+		seq: Int[T, "BL"],
+		coords_bb: Float[T, "BL 4 3"],
+		frames: Float[T, "BL 3 3"],
+		seq_idx: Int[T, "BL"],
+		chain_idx: Int[T, "BL"],
+		sample_idx: Int[T, "BL"],
+		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-	) -> Float[T, "ZN d_conditioning"]:
+	) -> Float[T, "BL d_conditioning"]:
 		seq_conditioning = self.conditioning_seq(seq)
 		seq_coords_conditioning = self.conditioning_mpnn(coords_bb, frames, seq_idx, chain_idx, sample_idx, seq_conditioning)
 		seq_coords_conditioning = self.conditioning_transformer(seq_coords_conditioning, cu_seqlens, max_seqlen)
 		return seq_coords_conditioning
 	
-	def featurize_t(self, t: Int[T, "ZN"]) -> Float[T, "ZN d_conditioning"]:
+	def featurize_t(self, t: Int[T, "BL"]) -> Float[T, "BL d_conditioning"]:
 		phase = self.t_wavenumbers.unsqueeze(0) * t.unsqueeze(1)
 		sines = torch.sin(phase)
 		cosines = torch.cos(phase)

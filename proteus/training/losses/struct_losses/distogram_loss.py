@@ -1,8 +1,14 @@
-import triton
-import triton.language as tl
 import torch
+from unittest.mock import MagicMock
 
 from proteus.types import Float, Int, T
+
+if torch.cuda.is_available():
+    import triton
+    import triton.language as tl
+else:
+    triton = MagicMock()
+    tl = MagicMock()
 
 
 @triton.autotune(
@@ -20,25 +26,25 @@ def distogram_loss_fwd_bwd(
     # outputs
     per_token_loss_ptr, d_logits_ptr, d_fc1_ptr, d_fc2_ptr, d_coords_ptr,
     # shapes
-    ZN, Z, d_in, d_hidden, d_out,
+    BL, B, d_in, d_hidden, d_out,
     # distance bin params
     min_dist, max_dist,
-    # strides - logits (ZN, 2, d_in)
-    stride_logits_zn, stride_logits_2, stride_logits_d,
+    # strides - logits (BL, 2, d_in)
+    stride_logits_bl, stride_logits_2, stride_logits_d,
     # strides - fc1 (d_hidden, 2*d_in)
     stride_fc1_hidden, stride_fc1_in,
     # strides - fc2 (d_out, d_hidden)
     stride_fc2_out, stride_fc2_hidden,
-    # strides - coords (ZN, 3)
-    stride_coords_zn, stride_coords_3,
-    # strides - d_logits (ZN, 2, d_in)
-    stride_dlogits_zn, stride_dlogits_2, stride_dlogits_d,
+    # strides - coords (BL, 3)
+    stride_coords_bl, stride_coords_3,
+    # strides - d_logits (BL, 2, d_in)
+    stride_dlogits_bl, stride_dlogits_2, stride_dlogits_d,
     # strides - d_fc1 (d_hidden, 2*d_in)
     stride_dfc1_hidden, stride_dfc1_in,
     # strides - d_fc2 (d_out, d_hidden)
     stride_dfc2_out, stride_dfc2_hidden,
-    # strides - d_coords (ZN, 3)
-    stride_dcoords_zn, stride_dcoords_3,
+    # strides - d_coords (BL, 3)
+    stride_dcoords_bl, stride_dcoords_3,
     # block sizes
     BLOCK_D: tl.constexpr,
 ):
@@ -52,7 +58,7 @@ def distogram_loss_fwd_bwd(
     # find sequence bounds via linear search
     seq_start = 0
     seq_end = 0
-    for s in range(Z):
+    for s in range(B):
         start_s = tl.load(cu_seqlens_ptr + s)
         end_s = tl.load(cu_seqlens_ptr + s + 1)
         if start_s <= pid and pid < end_s:
@@ -89,15 +95,15 @@ def distogram_loss_fwd_bwd(
     )
 
     # load q[i], k[i]
-    qi_ptr = logits_ptr + pid * stride_logits_zn + 0 * stride_logits_2 + offs * stride_logits_d
-    ki_ptr = logits_ptr + pid * stride_logits_zn + 1 * stride_logits_2 + offs * stride_logits_d
+    qi_ptr = logits_ptr + pid * stride_logits_bl + 0 * stride_logits_2 + offs * stride_logits_d
+    ki_ptr = logits_ptr + pid * stride_logits_bl + 1 * stride_logits_2 + offs * stride_logits_d
     qi = tl.load(qi_ptr, mask=offs < d_in, other=0.0)
     ki = tl.load(ki_ptr, mask=offs < d_in, other=0.0)
 
     # load coords[i]
-    xi = tl.load(coords_ptr + pid * stride_coords_zn + 0)
-    yi = tl.load(coords_ptr + pid * stride_coords_zn + 1)
-    zi = tl.load(coords_ptr + pid * stride_coords_zn + 2)
+    xi = tl.load(coords_ptr + pid * stride_coords_bl + 0)
+    yi = tl.load(coords_ptr + pid * stride_coords_bl + 1)
+    zi = tl.load(coords_ptr + pid * stride_coords_bl + 2)
 
     # accumulators
     loss_acc = 0.0
@@ -112,15 +118,15 @@ def distogram_loss_fwd_bwd(
         valid = True
 
         # load q[j], k[j]
-        qj_ptr = logits_ptr + j * stride_logits_zn + 0 * stride_logits_2 + offs * stride_logits_d
-        kj_ptr = logits_ptr + j * stride_logits_zn + 1 * stride_logits_2 + offs * stride_logits_d
+        qj_ptr = logits_ptr + j * stride_logits_bl + 0 * stride_logits_2 + offs * stride_logits_d
+        kj_ptr = logits_ptr + j * stride_logits_bl + 1 * stride_logits_2 + offs * stride_logits_d
         qj = tl.load(qj_ptr, mask=offs < d_in, other=0.0)
         kj = tl.load(kj_ptr, mask=offs < d_in, other=0.0)
 
         # load coords[j]
-        xj = tl.load(coords_ptr + j * stride_coords_zn + 0)
-        yj = tl.load(coords_ptr + j * stride_coords_zn + 1)
-        zj = tl.load(coords_ptr + j * stride_coords_zn + 2)
+        xj = tl.load(coords_ptr + j * stride_coords_bl + 0)
+        yj = tl.load(coords_ptr + j * stride_coords_bl + 1)
+        zj = tl.load(coords_ptr + j * stride_coords_bl + 2)
 
         # compute distance
         dx, dy, dz = xi - xj, yi - yj, zi - zj
@@ -215,7 +221,7 @@ def distogram_loss_fwd_bwd(
         d_fc2_acc += tl.where(valid, d_fc2_local, 0.0)
 
         # atomic add d_kj to d_logits[j, 1, :] (normalized)
-        d_kj_ptr = d_logits_ptr + j * stride_dlogits_zn + 1 * stride_dlogits_2 + offs * stride_dlogits_d
+        d_kj_ptr = d_logits_ptr + j * stride_dlogits_bl + 1 * stride_dlogits_2 + offs * stride_dlogits_d
         d_kj_norm = tl.where(valid, d_kj_local * inv_n_pairs, 0.0)
         tl.atomic_add(d_kj_ptr, d_kj_norm, mask=d_mask)
 
@@ -232,7 +238,7 @@ def distogram_loss_fwd_bwd(
 
     # atomic add d_qi to d_logits[i, 0, :]
     d_mask = offs < d_in
-    d_qi_ptr = d_logits_ptr + pid * stride_dlogits_zn + 0 * stride_dlogits_2 + offs * stride_dlogits_d
+    d_qi_ptr = d_logits_ptr + pid * stride_dlogits_bl + 0 * stride_dlogits_2 + offs * stride_dlogits_d
     tl.atomic_add(d_qi_ptr, d_qi_acc, mask=d_mask)
 
     # atomic add d_fc1 (first half: cols 0..d_in-1, second half: cols d_in..2*d_in-1)
@@ -249,11 +255,11 @@ def distogram_loss_fwd_bwd(
 
 
 def distogram_loss(
-    logits: Float[T, "ZN 2 d_in"],
+    logits: Float[T, "BL 2 d_in"],
     fc1: Float[T, "d_hidden 2*d_in"],
     fc2: Float[T, "d_out d_hidden"],
-    coords: Float[T, "ZN 3"],
-    cu_seqlens: Int[T, "Z+1"],
+    coords: Float[T, "BL 3"],
+    cu_seqlens: Int[T, "B+1"],
     min_dist: float = 2.0,
     max_dist: float = 22.0,
 ) -> Float[T, "1"]:
@@ -265,26 +271,26 @@ class DistogramLoss(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        logits: Float[T, "ZN 2 d_in"],
+        logits: Float[T, "BL 2 d_in"],
         fc1: Float[T, "d_hidden 2*d_in"],
         fc2: Float[T, "d_out d_hidden"],
-        coords: Float[T, "ZN 3"],
-        cu_seqlens: Int[T, "Z+1"],
+        coords: Float[T, "BL 3"],
+        cu_seqlens: Int[T, "B+1"],
         min_dist: float,
         max_dist: float,
     ) -> Float[T, "1"]:
         # shapes
-        ZN, _, d_in = logits.shape
+        BL, _, d_in = logits.shape
         d_hidden, _ = fc1.shape
         d_out, _ = fc2.shape
-        Z = cu_seqlens.shape[0] - 1
+        B = cu_seqlens.shape[0] - 1
 
         # assertions
-        assert coords.shape == (ZN, 3), f"coords {coords.shape} != ({ZN}, 3)"
-        assert logits.shape == (ZN, 2, d_in), f"logits {logits.shape} != ({ZN}, 2, {d_in})"
+        assert coords.shape == (BL, 3), f"coords {coords.shape} != ({BL}, 3)"
+        assert logits.shape == (BL, 2, d_in), f"logits {logits.shape} != ({BL}, 2, {d_in})"
         assert fc1.shape == (d_hidden, 2 * d_in), f"fc1 {fc1.shape} != ({d_hidden}, {2 * d_in})"
         assert fc2.shape == (d_out, d_hidden), f"fc2 {fc2.shape} != ({d_out}, {d_hidden})"
-        assert cu_seqlens.shape == (Z + 1,), f"cu_seqlens {cu_seqlens.shape} != ({Z + 1},)"
+        assert cu_seqlens.shape == (B + 1,), f"cu_seqlens {cu_seqlens.shape} != ({B + 1},)"
         assert coords.is_cuda and logits.is_cuda and fc1.is_cuda and fc2.is_cuda and cu_seqlens.is_cuda
 
         # get orig dtypes
@@ -301,16 +307,16 @@ class DistogramLoss(torch.autograd.Function):
         fc2 = fc2.to(torch.float32).contiguous()
 
         # allocate outputs (use fp32 for accuracy)
-        per_token_loss = torch.zeros(ZN, device=coords.device, dtype=torch.float32)
-        d_coords = torch.zeros(ZN, 3, device=coords.device, dtype=torch.float32)
-        d_logits = torch.zeros(ZN, 2, d_in, device=coords.device, dtype=torch.float32)
+        per_token_loss = torch.zeros(BL, device=coords.device, dtype=torch.float32)
+        d_coords = torch.zeros(BL, 3, device=coords.device, dtype=torch.float32)
+        d_logits = torch.zeros(BL, 2, d_in, device=coords.device, dtype=torch.float32)
         d_fc1 = torch.zeros(d_hidden, 2 * d_in, device=coords.device, dtype=torch.float32)
         d_fc2 = torch.zeros(d_out, d_hidden, device=coords.device, dtype=torch.float32)
 
         # block size - use max of all dims, rounded to power of 2
         # tl.dot requires K >= 16, so ensure BLOCK_D >= 16
         BLOCK_D = max(16, triton.next_power_of_2(max(d_in, d_hidden, d_out)))
-        grid = (ZN,)
+        grid = (BL,)
 
         # launch kernel
         distogram_loss_fwd_bwd[grid](
@@ -319,7 +325,7 @@ class DistogramLoss(torch.autograd.Function):
             # outputs
             per_token_loss, d_logits, d_fc1, d_fc2, d_coords,
             # shapes
-            ZN, Z, d_in, d_hidden, d_out,
+            BL, B, d_in, d_hidden, d_out,
             # distance bin params
             min_dist, max_dist,
             # strides - logits

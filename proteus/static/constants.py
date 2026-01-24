@@ -40,13 +40,13 @@ alphabet = canonical_aas + noncanonical_aas + special_chars
 aa_2_lbl_dict = {aa: idx for idx, aa in enumerate(alphabet)}
 lbl_2_aa_dict = {idx: aa for aa, idx in aa_2_lbl_dict.items()}
 
-def aa_2_lbl(aa):
+def aa_2_lbl(aa: str) -> int:
     if aa in aa_2_lbl_dict:
         return aa_2_lbl_dict[aa]
     else:
         return aa_2_lbl_dict["X"]
 
-def lbl_2_aa(label): 
+def lbl_2_aa(label: int) -> str:
     if label in lbl_2_aa_dict:
         return lbl_2_aa_dict[label]
     else:
@@ -59,16 +59,16 @@ for aa, lbl in aa_2_lbl_dict.items(): # populate the lut array, each index corre
     if len(byte)==1: # skip mult character aa (e.g. <mask>)
         lut[byte[0]] = lbl
 
-def seq_2_lbls(seq):
+def seq_2_lbls(seq: str) -> np.ndarray:
     '''
     converts a string of amino acids (one-letter codes) to a tensor of labels
     does this in vectorized fashion
     '''
 
-    byte_idx = np.frombuffer(seq.encode('ascii'), dtype=np.uint8)  # shape [len(s)], each in [0,255]
+    byte_idx: np.ndarray = np.frombuffer(seq.encode('ascii'), dtype=np.uint8)  # shape [len(s)], each in [0,255]
 
     # vectorized lookup
-    labels = lut[byte_idx]  # shape [len(s)], dtype int64
+    labels: np.ndarray = lut[byte_idx]  # shape [len(s)], dtype int64
 
     return labels
 
@@ -137,7 +137,7 @@ af2_order = {aa: i for i, aa in enumerate(af2_restypes)}
 
 # Create mapping: our_label_index -> af2_index
 # For each position in our alphabet, find the corresponding AF2 index
-def _get_af2_index(aa):
+def _get_af2_index(aa: str) -> int:
     """Get AlphaFold2 index for an amino acid, defaulting to X (20) for unknown."""
     return af2_order.get(aa, 20)
 
