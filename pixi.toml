@@ -1,5 +1,5 @@
 [workspace]
-name = "Proteus"
+name = "proteus"
 version = "0.0.1"
 description = "Multimodal protein generative model"
 channels = ["conda-forge", "nvidia", "pytorch", "bioconda"]
