@@ -1,28 +1,11 @@
-# Proteus
+# proteus
+### jaime cardenas
 
-A multimodal protein generative model that generates proteins conditioned on partial sequence and/or structure. Uses a VAE with per-residue latents followed by latent diffusion.
+my codebase
+will have multiple projects, goal is to have a generalized framework in `proteus` directory, and add a `projects` directory where inidividual ideas
+will be implemented 
 
-**Status**: Architecture design phase
-
-## Key Features
-
-- **Per-residue latents** - each residue maps to a latent vector for fine-grained representation
-- **Flexible conditioning** - generate from any combo of partial sequence/structure
-- **Multi-task learning** - reconstructs sequence, structure, geometry simultaneously
-
-## Architecture
-
-1. **Tokenizer**: Converts atomic coordinates to voxelized electric field divergence representation
-2. **VAE Encoder**: CNN Downsample → MPNN → Transformer → Latent Projection (mu, logvar)
-3. **VAE Decoder**: Up Projection → Transformer → Multi-task heads (divergence, sequence, structure)
-4. **Latent Diffusion**: DiT-style denoising (planned)
-
-## Training
-
-- **Stage 1**: Train VAE end-to-end (reconstruction + KL)
-- **Stage 2**: Freeze VAE, train conditioning network + diffusion model
-
-## Setup
+## Setup (for the current project i have, inverse folding)
 
 We use pixi for this repo, so just run
 
