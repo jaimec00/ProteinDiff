@@ -18,7 +18,12 @@
       "Bash(do sed -i 's/proteindiff/proteus/g' \"$file\")",
       "Bash(done)",
       "Bash(pixi info:*)",
-      "Bash(.pixi/envs/cpu/bin/python -m pytest:*)"
+      "Bash(.pixi/envs/cpu/bin/python -m pytest:*)",
+      "Bash(/lambda/nfs/proteinDiffVirgina/proteus/.pixi/envs/gpu/bin/python:*)",
+      "Bash(pixi --version:*)",
+      "WebSearch",
+      "Bash(pixi install:*)",
+      "Bash(pixi clean:*)"
     ]
   }
 }

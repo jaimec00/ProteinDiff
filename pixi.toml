@@ -38,6 +38,7 @@ pytest = "*"
 mlflow = ">=3.0"
 jaxtyping = "*"
 psutil = "*"
+ninja = "*"
 
 [pypi-dependencies]
 proteus = { path = ".", editable = true }
@@ -55,6 +56,12 @@ cuda = "12"
 cuda = ">=12.9,<12.10"
 flash-attn = ">=2.8"
 nvidia-ml-py = "*"
+
+[feature.gpu.activation.env]
+CPATH = "$CONDA_PREFIX/targets/x86_64-linux/include"
+
+[feature.gpu.tasks]
+build-cuda = "python setup.py build_ext --inplace"
 
 [feature.gpu.pypi-dependencies]
 
