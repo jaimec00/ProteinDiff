@@ -1,5 +1,6 @@
-from .tokenizer import Tokenizer, TokenizerCfg
+from .structure_tokenizer import StructureTokenizer, StructureTokenizerCfg
+
 __all__ = [
-    "Tokenizer",
-    "TokenizerCfg"
+    "StructureTokenizer", 
+    "StructureTokenizerCfg"
 ]

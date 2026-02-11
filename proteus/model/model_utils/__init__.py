@@ -1,16 +1,19 @@
 from .mlp import (
     MLP, MLPCfg,
-    MPNNMLP, MPNNMLPCfg,
     FFN, FFNCfg,
     ProjectionHead, ProjectionHeadCfg,
+    SeqProjectionHead, SeqProjectionHeadCfg,
+    EdgeMLP, EdgeMLPCfg,
 )
 __all__ = [
     "MLP", 
     "MLPCfg"
-    "MPNNMLP", 
-    "MPNNMLPCfg",
     "FFN", 
     "FFNCfg",
     "ProjectionHead", 
     "ProjectionHeadCfg",
+    "SeqProjectionHead", 
+    "SeqProjectionHeadCfg",
+    "EdgeMLP", 
+    "EdgeMLPCfg",
 ]

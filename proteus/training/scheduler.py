@@ -10,7 +10,7 @@ class SchedulerCfg:
 
 def setup_scheduler(cfg: SchedulerCfg, optim: Optimizer):
 
-    if cfg.lr_type == "attn":
+    if cfg.lr_type == "sqrt":
 
         # compute the scale
         if cfg.lr_step == 0.0:

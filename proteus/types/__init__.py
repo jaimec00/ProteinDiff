@@ -5,7 +5,7 @@ T = torch.Tensor
 A = np.ndarray
 
 from jaxtyping import Float, Bool, Int, Union
-from typing import List, Dict, Tuple, Any, Callable, Optional
+from typing import List, Dict, Tuple, Any, Callable, Optional, Iterator
 
 __all__ = [
     "T",
@@ -19,5 +19,6 @@ __all__ = [
     "Any",
     "Callable",
     "Optional",
-    "Union"
+    "Union",
+    "Iterator",
 ]

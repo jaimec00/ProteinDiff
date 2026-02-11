@@ -1,19 +1,19 @@
+from dataclasses import dataclass, field
+from omegaconf import II
+
 import torch
 import torch.nn as nn
 
-from dataclasses import dataclass, field
-
-from proteus.model.base import Base
 from proteus.model.transformer.attention import MHA, MHACfg
 from proteus.model.model_utils.mlp import FFN, FFNCfg
 from proteus.types import Float, Int, Bool, T, List
-from proteus.utils.tensor import unpad, repad
+from proteus.model.base import Base
 
 
 @dataclass
 class TransformerBlockCfg:
-	d_model: int = 256
-	attn: MHACfg = field(default_factory=MHACfg) 
+	d_model: int = II("model.d_model")
+	attn: MHACfg = field(default_factory=MHACfg)
 	ffn: FFNCfg = field(default_factory=FFNCfg)
 
 
@@ -27,21 +27,21 @@ class TransformerBlock(Base):
 
 	def forward(
 		self,
-		x: Float[T, "BL d_model"],
+		x: Float[T, "BL D"],
 		cu_seqlens: Int[T, "B+1"],
 		max_seqlen: int,
-		) -> Float[T, "BL d_model"]:
-		x1 = self.attn(x, cu_seqlens, max_seqlen)
-		x = self.attn_norm(x+x1)
-		x1 = self.ffn(x)
-		x = self.ffn_norm(x+x1)
+	) -> Float[T, "BL D"]:
+		# TODO: fix this to support cross attention
+		x1 = self.attn_norm(x)
+		x = x + self.attn(x1, x1, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen)
+		x = x + self.ffn(self.ffn_norm(x))
 		return x
 
 
 @dataclass
 class TransformerModelCfg:
 	transformer_block: TransformerBlockCfg = field(default_factory = TransformerBlockCfg)
-	layers: int = 4
+	layers: int = 1
 
 class TransformerModel(Base):
 	def __init__(self, cfg: TransformerModelCfg) -> None:
@@ -53,19 +53,32 @@ class TransformerModel(Base):
 
 	def forward(
 		self,
-		x: Float[T, "B L d_model"],
-		pad_mask: Bool[T, "B L"]
-		) -> Float[T, "B L d_model"]:
+		x: Float[T, "BL d_model"],
+		cu_seqlens: Bool[T, "BL"],
+		max_seqlen: int
+		) -> Float[T, "BL d_model"]:
 
-		# Unpad for flash attention (requires BL)
-		[x_unpacked], cu_seqlens, max_seqlen = unpad(x, pad_mask=pad_mask)
-
-		# Process with TransformerBlocks (unchanged)
 		for block in self.blocks:
-			x_unpacked = block(x_unpacked, cu_seqlens, max_seqlen)
+			x = block(x, cu_seqlens, max_seqlen)
 
-		# Repad output
-		[x_padded] = repad(x_unpacked, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+		return x
 
-		return x_padded
+# just to make interpolation cleaner, packed pairs logic dealt with in dataloader
+@dataclass
+class PairMHACfg(MHACfg):
+	d_model: int = II("model.d_pair")
 
+@dataclass
+class PairFFNCfg(FFNCfg):
+	d_model: int = II("model.d_pair")
+	expansion_factor: int = 2
+
+@dataclass 
+class PairformerBlockCfg(TransformerBlockCfg):
+	d_model: int = II("model.d_pair")
+	attn: PairMHACfg = field(default_factory=PairMHACfg)
+	ffn: PairFFNCfg = field(default_factory=PairFFNCfg)
+
+@dataclass
+class PairformerModelCfg(TransformerModelCfg):
+	transformer_block: PairformerBlockCfg = field(default_factory=PairformerBlockCfg)

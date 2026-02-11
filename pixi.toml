@@ -10,11 +10,17 @@ cpu = { features = ["cpu"] , solve-group = "cpu" }
 gpu = { features = ["gpu"] , solve-group = "gpu" }
 
 [activation.env]
-EXP_DIR = "$HOME/proteinDiffVirgina/experiments/"
+EXP_DIR = "$HOME/proteinDiffVirgina/experiments/mlflow"
+MLFLOW_HOST = "localhost"
+MLFLOW_PORT = "5000"
+MLFLOW_SERVE_ARTIFACTS = "False"
 MLFLOW_TRACKING_URI = "sqlite:///$EXP_DIR/mlruns.db"
+MLFLOW_BACKEND_STORE_URI = "$MLFLOW_TRACKING_URI"
+MLFLOW_REGISTRY_STORE_URI = "$MLFLOW_TRACKING_URI"
+MLFLOW_DEFAULT_ARTIFACT_ROOT = "$EXP_DIR/artifacts"
 
 [tasks]
-local_mlflow = "mlflow server --host localhost --port 5000 --backend-store-uri $MLFLOW_TRACKING_URI"
+serve = "mlflow server"
 
 [dependencies]
 python = ">=3.12"
@@ -29,12 +35,12 @@ einops = "*"
 omegaconf = "*"
 hydra-core = "*"
 pytest = "*"
+mlflow = ">=3.0"
+jaxtyping = "*"
+psutil = "*"
 
 [pypi-dependencies]
-jaxtyping = "*"
 proteus = { path = ".", editable = true }
-mlflow = "*"
-psutil = "*"
 
 [feature.cpu]
 
@@ -48,8 +54,8 @@ cuda = "12"
 [feature.gpu.dependencies]
 cuda = ">=12.9,<12.10"
 flash-attn = ">=2.8"
+nvidia-ml-py = "*"
 
 [feature.gpu.pypi-dependencies]
-nvidia-ml-py = "*"
 
 

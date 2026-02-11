@@ -1,6 +1,12 @@
-from . import model, static
+from . import model, static, data, losses, training, types, utils, conf
 
 __all__ = [
     "model",
-    "static"
+    "static",
+    "data", 
+    "losses", 
+    "training", 
+    "types", 
+    "utils", 
+    "conf"
 ]

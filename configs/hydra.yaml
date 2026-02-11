@@ -1,7 +1,0 @@
-hydra:
-  run:
-    dir: /home/ubuntu/proteinDiffVirgina/experiments/run/${now:%Y-%m-%d}/${now:%H-%M-%S}
-
-  sweep:
-    dir: /home/ubuntu/proteinDiffVirgina/experiments/sweep/${now:%Y-%m-%d}/${now:%H-%M-%S}
-    subdir: ${hydra.override_dir}

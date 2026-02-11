@@ -20,6 +20,7 @@ import shutil
 from dataclasses import dataclass
 from hydra.core.hydra_config import HydraConfig
 import mlflow
+import os
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -39,7 +40,11 @@ class Logger():
 		self.out_path = Path(HydraConfig.get().runtime.output_dir)
 		self.log = logging.getLogger(__name__)
 		self.log_interval = cfg.log_interval
-
+		
+		host = os.environ.get("MLFLOW_HOST", "localhost")
+		port = os.environ.get("MLFLOW_PORT", "5000")
+		mlflow.set_tracking_uri(f"http://{host}:{port}")
+		mlflow.set_experiment(cfg.experiment_name)
 		if cfg.log_system_metrics:
 			mlflow.enable_system_metrics_logging()
 			mlflow.set_system_metrics_sampling_interval(cfg.system_metrics_sample_interval)
@@ -47,7 +52,6 @@ class Logger():
 		else:
 			mlflow.disable_system_metrics_logging()
 		
-		mlflow.set_experiment(cfg.experiment_name)
 
 	def log_losses(self, losses_dict, mode="train"):
 
@@ -58,5 +62,8 @@ class Logger():
 
 	def log_step(self, step_metrics, step):
 		mlflow.log_metrics(metrics=step_metrics, step=step)
+
+	def log_param(self, key, val):
+		mlflow.log_param(key, val)
 	
 # ----------------------------------------------------------------------------------------------------------------------

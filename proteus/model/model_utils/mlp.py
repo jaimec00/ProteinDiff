@@ -1,13 +1,16 @@
-import torch.nn.functional as F
-import torch.nn.init as init
-from dataclasses import dataclass, field
-from enum import StrEnum
 
+from dataclasses import dataclass, field
+import torch.nn.init as init
+from enum import StrEnum
+from omegaconf import II
+
+import torch.nn.functional as F
 import torch
 import torch.nn as nn
 
 from proteus.model.base import Base
 from proteus.types import T, Callable
+from proteus.static.constants import canonical_aas
 
 
 class ActivationFn(StrEnum):
@@ -18,9 +21,9 @@ class ActivationFn(StrEnum):
 
 @dataclass
 class MLPCfg:
-	d_in: int = 256
-	d_out: int = 256
-	d_hidden: int = 1024
+	d_in: int = II("model.d_model")
+	d_out: int = II(".d_in")
+	d_hidden: int = II(".d_out")
 	hidden_layers: int = 0
 	dropout: float = 0.0
 	act: ActivationFn = ActivationFn.GELU
@@ -76,35 +79,14 @@ class MLP(Base):
 		x = self.out_proj(x) # no activation or dropout on output
 
 		return x
-
-@dataclass
-class MPNNMLPCfg:
-	d_model: int = 256
-	hidden_layers: int = 2
-	dropout: float = 0.0
-	act: ActivationFn = ActivationFn.GELU
-	zeros: bool = False
-
-class MPNNMLP(MLP):
-	def __init__(self, cfg: MPNNMLPCfg) -> None:
-		mlp_cfg: MLPCfg = MLPCfg(
-			d_in=3*cfg.d_model,
-			d_out=cfg.d_model,
-			d_hidden=cfg.d_model,
-			hidden_layers=cfg.hidden_layers,
-			dropout=cfg.dropout,
-			act=cfg.act,
-			zeros=cfg.zeros,
-		)
-		super().__init__(mlp_cfg)
 	
 @dataclass
 class FFNCfg:
-	d_model: int = 256
+	d_model: int = II("model.d_model")
 	expansion_factor: int = 4
 	dropout: float = 0.0
 	act: ActivationFn = ActivationFn.GELU
-	zeros: bool = False
+	zeros: bool = True
 
 class FFN(MLP):
 	def __init__(self, cfg: FFNCfg) -> None:
@@ -118,11 +100,12 @@ class FFN(MLP):
 			zeros=cfg.zeros,
 		)
 		super().__init__(mlp_cfg)
-		
+
+# no defaults because this is a base class for the below
 @dataclass
 class ProjectionHeadCfg:
-    d_in: int = 256
-    d_out: int = 256
+    d_in: int
+    d_out: int
 
 class ProjectionHead(MLP):
     def __init__(self, cfg: ProjectionHeadCfg) -> None:
@@ -133,6 +116,32 @@ class ProjectionHead(MLP):
             hidden_layers=0,
             dropout = 0.0,
             act = ActivationFn.GELU,
+        )
+        super().__init__(mlp_cfg)
+
+@dataclass
+class SeqProjectionHeadCfg:
+    d_model: int = II("model.d_model")
+
+class SeqProjectionHead(ProjectionHead):
+    def __init__(self, cfg: SeqProjectionHeadCfg) -> None:
+        projection_cfg: ProjectionHeadCfg = ProjectionHeadCfg(
+            d_in=cfg.d_model,
+            d_out=len(canonical_aas),
+        )
+        super().__init__(projection_cfg)
+		
+@dataclass
+class EdgeMLPCfg:
+    d_model: int = II("model.d_pair")
+
+class EdgeMLP(MLP):
+    def __init__(self, cfg: EdgeMLPCfg) -> None:
+        mlp_cfg: MLPCfg = MLPCfg(
+            d_in=cfg.d_model,
+            d_out=cfg.d_model,
+			d_hidden=cfg.d_model,
+			hidden_layers=2,
         )
         super().__init__(mlp_cfg)
 

@@ -1,15 +1,9 @@
 from .base import Base
-from .proteus import proteus, proteusCfg
-from . import transformer, vae, mpnn, model_utils, tokenizer
+from . import transformer, model_utils
 
 
 __all__ = [
     "Base",
     "transformer",
-    "vae",
-    "mpnn",
     "model_utils",
-    "tokenizer",
-    "proteus",
-    "proteusCfg",
 ]
