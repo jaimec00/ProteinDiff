@@ -66,18 +66,19 @@ __global__ void wf_embedding_learn_aa_kernel(
 	// one block per packed observer token — no batch dimension
 	int offs_NI = blockIdx.x;
 
-	// shared memory layout: [coordsA_NI | wavenumbers | out | d_aa | aa_magnitudes]
-	// cu_seqlens stays in global memory / L2 cache — read once per block, not worth smem
+	// shared memory layout: [seq_info | coordsA_NI | wavenumbers | out | d_aa | aa_magnitudes]
+	// seq_info is separate from coordsA_NI to avoid WAR hazard when coords overwrite seq boundaries
 	extern __shared__ __align__(4) char smem[];
 
 	int num_wn = d_model / 2;
 	int num_aa = tot_AA * num_wn;
-	int smem_float_bytes = sizeof(float) * (3 + num_wn + d_model + tot_AA * d_model);
+	int smem_float_bytes = sizeof(float) * (2 + 3 + num_wn + d_model + tot_AA * d_model);
 	int smem_half_bytes = sizeof(__half) * num_aa;
 	int smem_bytes = smem_float_bytes + smem_half_bytes;
 
-	// partition shared memory
-	float* coordsA_NI_smem = reinterpret_cast<float*>(smem);
+	// partition shared memory — seq_info lives in its own slot, not aliased with coords
+	int* seq_info_smem = reinterpret_cast<int*>(smem);
+	float* coordsA_NI_smem = reinterpret_cast<float*>(smem + sizeof(int) * 2);
 	float* wavenumbers_smem = coordsA_NI_smem + 3;
 	float* out_smem = wavenumbers_smem + num_wn;
 	float* d_aa_smem = out_smem + d_model;
@@ -95,19 +96,18 @@ __global__ void wf_embedding_learn_aa_kernel(
 	__syncthreads();
 
 	// thread 0 binary-searches cu_seqlens in global memory (L2 cached across all blocks)
-	// broadcasts result via coordsA_NI_smem (unused until j==0 overwrites it with coords)
 	if (thread_id == 0) {
 		int seq_idx = find_seq_idx(cu_seqlens_ptr, num_seqs, offs_NI);
 		int seq_start = __ldg(&cu_seqlens_ptr[seq_idx]);
 		int seq_len = __ldg(&cu_seqlens_ptr[seq_idx + 1]) - seq_start;
-		reinterpret_cast<int*>(coordsA_NI_smem)[0] = seq_start;
-		reinterpret_cast<int*>(coordsA_NI_smem)[1] = seq_len;
+		seq_info_smem[0] = seq_start;
+		seq_info_smem[1] = seq_len;
 	}
 	__syncthreads();
 
 	// all threads read sequence boundaries into registers
-	int seq_start = reinterpret_cast<int*>(coordsA_NI_smem)[0];
-	int seq_len = reinterpret_cast<int*>(coordsA_NI_smem)[1];
+	int seq_start = seq_info_smem[0];
+	int seq_len = seq_info_smem[1];
 	int offs_NI_local = offs_NI - seq_start;
 
 	// register variables for observer coordinates and per-aa state
@@ -266,10 +266,9 @@ void wf_embedding_learn_aa_kernel_forward(
 	cudaFuncSetAttribute(wf_embedding_learn_aa_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, maxSharedMemPerBlockOptin);
 	cudaFuncSetCacheConfig(wf_embedding_learn_aa_kernel, cudaFuncCachePreferShared);
 
-	// shared memory: float arrays (coords, wavenumbers, out, d_aa) + half aa_magnitudes
-	// cu_seqlens stays in global memory / L2, not in smem
+	// shared memory: seq_info (2 ints) + float arrays (coords, wavenumbers, out, d_aa) + half aa_magnitudes
 	int num_wn = d_model / 2;
-	int shared_mem = sizeof(float) * (3 + num_wn + d_model + tot_AA * d_model)
+	int shared_mem = sizeof(float) * (2 + 3 + num_wn + d_model + tot_AA * d_model)
 				   + sizeof(__half) * (num_wn * tot_AA);
 
 	wf_embedding_learn_aa_kernel<<<grid_size, block_size, shared_mem, stream>>>(
