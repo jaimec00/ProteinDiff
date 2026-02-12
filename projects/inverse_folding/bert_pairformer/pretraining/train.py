@@ -12,11 +12,12 @@ from proteus.model.transformer import (
     PairformerModelCfg, PairformerBlockCfg, PairMHACfg, PairAggregatorCfg,
     TransformerBlockCfg, TransformerModelCfg, MHACfg,
 )
+from proteus.data.construct_registry import ConstructFunctionNames
 from proteus.types import Any
 
 defaults = [
     "_self_",
-    {"data": "default"},
+    {"data": "small_seq"},
     {"logger": "default"},
     {"losses": "cel_loss"},
     {"optim": "adamw"},
@@ -28,6 +29,7 @@ defaults = [
 @dataclass
 class BertPairformerPretrainCfg(TrainingRunCfg):
     defaults: list = field(default_factory=lambda: defaults)
+    construct_function: str = ConstructFunctionNames.PAIRFORMER
     model: Any = MISSING
 
 # everything is interpolated, can be more specific if you like

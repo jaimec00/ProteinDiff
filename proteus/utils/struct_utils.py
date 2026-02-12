@@ -25,6 +25,14 @@ def get_backbone(C: Float[T, "BL 14 3"]) -> Float[T, "BL 4 3"]:
     return torch.stack([n, ca, c, cb], dim=1)
 
 @torch.no_grad()
+def get_CA_raw_and_CB_unit(C: Float[T, "BL 14 3"]) -> Float[T, "BL 4 3"]:
+    C_backbone = get_backbone(C)
+    CA, CB = C_backbone[:, 1, :], C_backbone[:, 3, :]
+    CACB = CB - CA
+    CACB_unit = normalize_vec(CACB)
+    return CA, CACB_unit
+
+@torch.no_grad()
 def compute_frames(
     C_backbone: Float[T, "B L 4 3"]
 ) -> Tuple[Float[T, "BL 3"], Float[T, "BL 3 3"]]:

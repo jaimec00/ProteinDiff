@@ -15,8 +15,8 @@ import hashlib
 import random
 
 from proteus.static.constants import aa_2_lbl, seq_2_lbls
-from proteus.utils.struct_utils import get_backbone, compute_frames
 from proteus.types import A, T, Float, Int, Bool
+from proteus.data.construct_registry import ConstructRegisry
 
 
 @dataclass
@@ -120,7 +120,9 @@ class BatchBuilder:
 		# all assemblies have been batched or in buffer, empty the buffer
 		while self._buffer:
 			if self._batch_full():
-				yield DataBatch(self._cur_batch)
+				data_batch = DataBatch(self._cur_batch)
+				if not data_batch.is_empty:
+					yield data_batch
 				self._clear_batch()
 			self._add_batch()
 
@@ -153,7 +155,9 @@ class DataBatch:
 	def __init__(self, batch_list: List[Assembly]) -> None:
 		
 		if not batch_list:
-			raise ValueError
+			raise ValueError()
+
+		needs_pair_cuseqlens = ConstructRegisry.needs_pair_cuseqlens
 
 		batch_dict = defaultdict(list)
 		seq_lens = []
@@ -168,8 +172,9 @@ class DataBatch:
 					break
 				if key == "labels":
 					seq_lens.append(tokens)
-					pair_seq_lens.extend([tokens]*tokens)
-					pair_reduce_idxs.extend([tot_tokens + i for i in range(tokens) for _ in range(tokens)])
+					if needs_pair_cuseqlens:
+						pair_seq_lens.extend([tokens]*tokens)
+						pair_reduce_idxs.extend([tot_tokens + i for i in range(tokens) for _ in range(tokens)])
 					tot_tokens += tokens
 				batch_dict[key].append(value)
 
@@ -189,18 +194,25 @@ class DataBatch:
 		
 		assert "labels" in batch_dict
 		assert "loss_mask" in batch_dict
-		self._attr_names = list(batch_dict.keys()) + ["cu_seqlens", "pair_cu_seqlens", "pair_reduce_idxs"]
-		for attr, tensor_list in batch_dict.items():
-			tensor = torch.cat(tensor_list, dim=0)
-			setattr(self, attr, tensor)
+		self._tensor_names = list(batch_dict.keys()) + ["cu_seqlens"] 
+		if needs_pair_cuseqlens:
+			self._tensor_names += ["pair_cu_seqlens", "pair_reduce_idxs"]
 
-		self.tokens = self.loss_mask.sum().item()
+		for tensor_name, tensor_list in batch_dict.items():
+			tensor = torch.cat(tensor_list, dim=0)
+			setattr(self, tensor_name, tensor)
+	
+	@property
+	def tokens(self):
+		return self.loss_mask.sum().item()
 		
 	def move_to(self, device: torch.device) -> None:
-		for attr_name in self._attr_names:
-			attr = getattr(self, attr_name)
-			if isinstance(attr, T):
-				setattr(self, attr_name, attr.to(device))
+		if not hasattr(self, "_tensor_names"):
+			raise ValueError(f"no tensors!! the data batch is probably empty: {self.is_empty=}")
+		for tensor_name in self._tensor_names:
+			tensor = getattr(self, tensor_name)
+			if isinstance(tensor, T):
+				setattr(self, tensor_name, tensor.to(device))
 
 	def __len__(self) -> int:
 		return self.tokens
@@ -366,6 +378,8 @@ class Assembly:
 
 		self._crop(max_seq_size)
 
+		self.construct_registry = ConstructRegisry()
+
 	@torch.no_grad()
 	def construct(self) -> None:
 
@@ -405,39 +419,10 @@ class Assembly:
 		trgt_mask = chain_idx == self._trgt_chain
 		homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
 		caa_mask = labels != aa_2_lbl("X")  # L
-		loss_mask = caa_mask & trgt_mask
-		seq_mask = ~homo_mask
 
-		# get backbone and frames
-		coords_bb = get_backbone(coords)
-		_, frames = compute_frames(coords_bb)
-
-		# pairwise stuff
-		coords_bb_dist = torch.sum((coords_bb[:, None, :, None, :] - coords_bb[None, :, None, :, :]).pow_(2), dim=-1).sqrt_()
-		diff_chain = chain_idx[:, None] != chain_idx[None, :]
-		rel_seq_idx = seq_idx[:, None] - seq_idx[None, :]
-		rel_frames = torch.matmul(frames[:, None, :, :].transpose(-2,-1), frames[None, :, :, :])
-
-		# flatten pairwise stuff
-		L = coords_bb.size(0)
-		coords_bb_dist = coords_bb_dist.reshape(L*L, 4, 4)
-		diff_chain = diff_chain.reshape(L*L)
-		rel_seq_idx = rel_seq_idx.reshape(L*L)
-		rel_frames = rel_frames.reshape(L*L, 3, 3)
-
-		# a buffer to reduce the pairs into singles
-		reduction_buffer = torch.zeros_like(labels, dtype=torch.float)
-
-		return {
-			"coords_bb_dist": coords_bb_dist,
-			"diff_chain": diff_chain,
-			"rel_seq_idx": rel_seq_idx,
-			"rel_frames": rel_frames,
-			"reduction_buffer": reduction_buffer,
-			"labels": labels,
-			"seq_mask": seq_mask,
-			"loss_mask": loss_mask,
-		}
+		return ConstructRegisry.construct(
+			coords, labels, seq_idx, chain_idx, trgt_mask, homo_mask, caa_mask, atom_mask
+		)
 
 		
 	@torch.no_grad()
@@ -457,3 +442,4 @@ class Assembly:
 
 	def __len__(self) -> int:
 		return self.labels.shape[0]*self.asmb_xform.shape[0]
+

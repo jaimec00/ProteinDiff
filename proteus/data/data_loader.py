@@ -43,6 +43,7 @@ class DataCfg:
 	seed: int = 42
 	epoch: Any = None
 
+
 class DataHolder:
 
 	'''

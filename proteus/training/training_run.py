@@ -20,6 +20,7 @@ from omegaconf import OmegaConf as om, DictConfig, MISSING
 import torch
 
 from proteus.data.data_loader import DataHolder, DataHolderCfg
+from proteus.data.construct_registry import ConstructRegisry
 from proteus.data.data_utils import DataBatch
 from proteus.training.logger import Logger, LoggerCfg
 from proteus.losses.training_loss import TrainingRunLosses, LossFnCfg
@@ -48,6 +49,7 @@ class TrainingParamsCfg:
 @dataclass
 class TrainingRunCfg:
 	model: Any = MISSING
+	construct_function: str = MISSING
 	data: DataHolderCfg = MISSING
 	logger: LoggerCfg = MISSING
 	losses: LossFnCfg = MISSING
@@ -64,6 +66,9 @@ class TrainingRun:
 
 		self.gpu = torch.device('cuda' if torch.cuda.is_available() else "cpu")
 		self.cpu = torch.device("cpu")
+
+		# tells the data holder what data to create
+		ConstructRegisry.set_construct_function(cfg.construct_function)
 
 		self.data = DataHolder(cfg.data)
 		self.losses = TrainingRunLosses(cfg.losses)

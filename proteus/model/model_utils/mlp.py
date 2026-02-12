@@ -145,6 +145,21 @@ class EdgeMLP(MLP):
         )
         super().__init__(mlp_cfg)
 
+@dataclass
+class UpsampleMLPCfg:
+    d_in: int = II("model.d_model")
+    d_out: int = II(".d_in")
+
+class UpsampleMLP(MLP):
+    def __init__(self, cfg: EdgeMLPCfg) -> None:
+        mlp_cfg: MLPCfg = MLPCfg(
+            d_in=cfg.d_in,
+            d_out=cfg.d_out,
+			d_hidden=cfg.d_out*2,
+			hidden_layers=2,
+        )
+        super().__init__(mlp_cfg)
+
 # initializations for linear layers
 def init_orthogonal(m: nn.Module) -> None:
 	if isinstance(m, nn.Linear):
