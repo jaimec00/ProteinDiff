@@ -7,7 +7,7 @@ import torch
 from typing import List, Dict, Tuple, Generator, Optional, Any
 from collections import defaultdict
 from dataclasses import dataclass
-from bisect import insort
+from bisect import insort, bisect_right
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -16,7 +16,7 @@ import random
 
 from proteus.static.constants import aa_2_lbl, seq_2_lbls
 from proteus.types import A, T, Float, Int, Bool
-from proteus.data.construct_registry import ConstructRegisry
+from proteus.data.construct_registry import ConstructRegistry
 
 
 @dataclass
@@ -134,7 +134,11 @@ class BatchBuilder:
 		insort(self._buffer, asmb, key=len)
 
 	def _add_batch(self) -> None:
-		sampled_asmb = self._buffer.pop()
+		remaining = self._batch_tokens - self._cur_tokens
+		# find the largest assembly that fits in remaining capacity
+		idx = bisect_right(self._buffer, remaining, key=len) - 1
+		assert idx >= 0, f"_add_batch called but nothing fits: {remaining=}, smallest={len(self._buffer[0])}"
+		sampled_asmb = self._buffer.pop(idx)
 		self._cur_batch.append(sampled_asmb)
 		self._cur_tokens += len(sampled_asmb)
 
@@ -146,7 +150,7 @@ class BatchBuilder:
 		return len(self._buffer)>=self._buffer_size
 
 	def _batch_full(self) -> bool:
-		return (self._cur_tokens+(len(self._buffer[-1]) if self._buffer else 0)>self._batch_tokens) and self._cur_tokens > 0
+		return (self._cur_tokens + (len(self._buffer[0]) if self._buffer else 0) > self._batch_tokens) and self._cur_tokens > 0
 
 
 class DataBatch:
@@ -157,7 +161,7 @@ class DataBatch:
 		if not batch_list:
 			raise ValueError()
 
-		needs_pair_cuseqlens = ConstructRegisry.needs_pair_cuseqlens
+		needs_pair_cuseqlens = ConstructRegistry.needs_pair_cuseqlens()
 
 		batch_dict = defaultdict(list)
 		seq_lens = []
@@ -203,8 +207,12 @@ class DataBatch:
 			setattr(self, tensor_name, tensor)
 	
 	@property
-	def tokens(self):
+	def loss_tokens(self):
 		return self.loss_mask.sum().item()
+		
+	@property
+	def tokens(self):
+		return self.loss_mask.size(0)
 		
 	def move_to(self, device: torch.device) -> None:
 		if not hasattr(self, "_tensor_names"):
@@ -378,8 +386,6 @@ class Assembly:
 
 		self._crop(max_seq_size)
 
-		self.construct_registry = ConstructRegisry()
-
 	@torch.no_grad()
 	def construct(self) -> None:
 
@@ -420,7 +426,7 @@ class Assembly:
 		homo_mask = torch.isin(chain_idx, torch.from_numpy(self._homo_chains))
 		caa_mask = labels != aa_2_lbl("X")  # L
 
-		return ConstructRegisry.construct(
+		return ConstructRegistry.construct(
 			coords, labels, seq_idx, chain_idx, trgt_mask, homo_mask, caa_mask, atom_mask
 		)
 

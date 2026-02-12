@@ -31,7 +31,7 @@ class SmallSeqData(DefaultData):
 
 @dataclass
 class MediumSeqData(DefaultData):
-    batch_tokens: int = 1024
+    batch_tokens: int = 16384
     max_seq_size: int = 1024
 
 @dataclass
@@ -44,18 +44,12 @@ class XLargeSeqData(DefaultData):
     batch_tokens: int = 16384
     max_seq_size: int = 16384
 
-@dataclass
-class SmallData(DefaultData):
-    num_train: int = 128
-    num_val: int = 128
-    num_test: int = 128
 
 def register_data():
     cs = ConfigStore.instance()
     cs.store(name="default", node=DefaultData, group="data")
-    cs.store(name="extra_small_seq", node=SmallSeqData, group="data")
+    cs.store(name="extra_small_seq", node=XSmallSeqData, group="data")
     cs.store(name="small_seq", node=SmallSeqData, group="data")
-    cs.store(name="medium_seq", node=SmallSeqData, group="data")
-    cs.store(name="large_seq", node=SmallSeqData, group="data")
-    cs.store(name="extra_large_seq", node=SmallSeqData, group="data")
-    cs.store(name="small", node=SmallData, group="data")
+    cs.store(name="medium_seq", node=MediumSeqData, group="data")
+    cs.store(name="large_seq", node=LargeSeqData, group="data")
+    cs.store(name="extra_large_seq", node=XLargeSeqData, group="data")

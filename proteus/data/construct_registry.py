@@ -10,24 +10,23 @@ class ConstructFunctionNames(enum.StrEnum):
 	PROTEUS = "proteus"
 	PAIRFORMER = "pairformer"
 
-class ConstructRegisry:
+class ConstructRegistry:
 
 	@staticmethod
 	def set_construct_function(construct_function: str):
 		global CONSTRUCT_FUNCTION
-		ConstructRegisry._assert_not_set()
+		ConstructRegistry._assert_not_set()
 		assert construct_function in ConstructFunctionNames
 		CONSTRUCT_FUNCTION = construct_function
 
-	@property
 	@staticmethod
 	def needs_pair_cuseqlens():
-		ConstructRegisry._assert_set()
+		ConstructRegistry._assert_set()
 		return CONSTRUCT_FUNCTION in [ConstructFunctionNames.PAIRFORMER]
 
 	@staticmethod
 	def construct(*args):
-		ConstructRegisry._assert_set()
+		ConstructRegistry._assert_set()
 		return getattr(ConstructFunctions, CONSTRUCT_FUNCTION)(*args)
 
 	@staticmethod

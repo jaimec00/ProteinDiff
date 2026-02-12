@@ -115,6 +115,8 @@ class Data(IterableDataset):
 
 		super().__init__()
 
+		assert config.max_seq_size <= config.batch_tokens, f"max_seq_size ({config.max_seq_size}) must be <= batch_tokens ({config.batch_tokens})"
+
 		# keep a cache of pdbs
 		self._pdb_cache = PDBCache(PDBCacheCfg(
 			pdb_path=config.data_path,
