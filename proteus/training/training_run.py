@@ -20,7 +20,7 @@ from omegaconf import OmegaConf as om, DictConfig, MISSING
 import torch
 
 from proteus.data.data_loader import DataHolder, DataHolderCfg
-from proteus.data.construct_registry import ConstructRegisry
+from proteus.data.construct_registry import ConstructRegistry
 from proteus.data.data_utils import DataBatch
 from proteus.training.logger import Logger, LoggerCfg
 from proteus.losses.training_loss import TrainingRunLosses, LossFnCfg
@@ -37,8 +37,8 @@ torch.backends.cudnn.allow_tf32 = True
 
 @dataclass
 class TrainingParamsCfg:
-	max_steps: int = 100_000        # Stop after this many steps
-	val_interval: int = 1_000       # Run validation every N steps
+	max_steps: int = 100_000
+	val_interval: int = 1_000
 	accumulation_steps: int = 1
 	grad_clip_norm: float = 0.0
 	compile_model: bool = False
@@ -68,7 +68,7 @@ class TrainingRun:
 		self.cpu = torch.device("cpu")
 
 		# tells the data holder what data to create
-		ConstructRegisry.set_construct_function(cfg.construct_function)
+		ConstructRegistry.set_construct_function(cfg.construct_function)
 
 		self.data = DataHolder(cfg.data)
 		self.losses = TrainingRunLosses(cfg.losses)
@@ -348,9 +348,22 @@ class TrainingRun:
 		delta_ts = cur_ts - self.last_ts
 
 		# create the metrics
-		losses_dict = losses.get_last_losses(scale=1/data_batch.tokens)
-		data_dict = {"toks_per_batch": data_batch.tokens*self.accumulation_steps, "samples_per_batch": data_batch.samples*self.accumulation_steps}
-		throughput_dict = {"toks_per_sec": data_batch.tokens*self.accumulation_steps / delta_ts, "updates_per_sec": 1 / delta_ts}
+		tokens, loss_tokens, samples = data_batch.tokens, data_batch.loss_tokens, data_batch.samples
+		losses_dict = losses.get_last_losses(scale=1/loss_tokens)
+		data_dict = {
+			"toks_per_batch": tokens*self.accumulation_steps, 
+			"loss_toks_per_batch": loss_tokens*self.accumulation_steps, 
+			"toks_per_sample": tokens / samples, 
+			"loss_toks_per_sample": loss_tokens / samples, 
+			"loss_toks_to_total_toks_ratio": loss_tokens / tokens,
+			"samples_per_batch": samples*self.accumulation_steps,
+		}
+		throughput_dict = {
+			"toks_per_sec": tokens*self.accumulation_steps / delta_ts, 
+			"loss_toks_per_sec": loss_tokens*self.accumulation_steps / delta_ts, 
+			"updates_per_sec": 1 / delta_ts,
+			"fwd_bwd_per_sec": self.accumulation_steps / delta_ts,
+		}
 
 		# format
 		losses_dict = {f"train/loss/{k}": v for k, v in losses_dict.items()}
@@ -386,7 +399,7 @@ class TrainingRun:
 	def update_pbar(self, pbar: tqdm, data_batch, step=1) -> None:
 		"""Update progress bar with loss and advance by 1 step."""
 		if self.last_step % 10 == 0:
-			pbar.set_postfix(loss=self.losses.tmp.get_last_loss() / data_batch.tokens)
+			pbar.set_postfix(loss=self.losses.tmp.get_last_loss() / data_batch.loss_tokens)
 		pbar.update(step)
 
 	@property
