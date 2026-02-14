@@ -37,8 +37,8 @@ torch.backends.cudnn.allow_tf32 = True
 
 @dataclass
 class TrainingParamsCfg:
-	max_steps: int = 100_000
-	val_interval: int = 1_000
+	max_steps: int = 100_000        # Stop after this many steps
+	val_interval: int = 1_000       # Run validation every N steps
 	accumulation_steps: int = 1
 	grad_clip_norm: float = 0.0
 	compile_model: bool = False
@@ -314,7 +314,7 @@ class TrainingRun:
 		data_batch.move_to(self.gpu)
 		outputs = self.model(data_batch)
 		losses = self.losses.loss_fn(outputs)
-		self.losses.tmp.add_losses(losses, valid_toks=data_batch.tokens)
+		self.losses.tmp.add_losses(losses, valid_toks=data_batch.loss_tokens)
 
 	def batch_backward(self, data_batch: DataBatch) -> None:
 
@@ -348,21 +348,23 @@ class TrainingRun:
 		delta_ts = cur_ts - self.last_ts
 
 		# create the metrics
-		tokens, loss_tokens, samples = data_batch.tokens, data_batch.loss_tokens, data_batch.samples
+		tokens = data_batch.tokens
+		loss_tokens = data_batch.loss_tokens.item()
+		samples = data_batch.samples
 		losses_dict = losses.get_last_losses(scale=1/loss_tokens)
 		data_dict = {
 			"toks_per_batch": tokens*self.accumulation_steps, 
 			"loss_toks_per_batch": loss_tokens*self.accumulation_steps, 
-			"toks_per_sample": tokens / samples, 
-			"loss_toks_per_sample": loss_tokens / samples, 
+			"loss_toks_per_sample": loss_tokens / samples,
 			"loss_toks_to_total_toks_ratio": loss_tokens / tokens,
 			"samples_per_batch": samples*self.accumulation_steps,
+			"toks_per_sample": tokens / samples,
 		}
 		throughput_dict = {
 			"toks_per_sec": tokens*self.accumulation_steps / delta_ts, 
-			"loss_toks_per_sec": loss_tokens*self.accumulation_steps / delta_ts, 
 			"updates_per_sec": 1 / delta_ts,
-			"fwd_bwd_per_sec": self.accumulation_steps / delta_ts,
+			"fwd_bwd_per_Sec": self.accumulation_steps / delta_ts,
+			"loss_toks_per_seq": loss_tokens / delta_ts
 		}
 
 		# format

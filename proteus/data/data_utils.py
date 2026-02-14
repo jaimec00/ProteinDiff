@@ -208,7 +208,7 @@ class DataBatch:
 	
 	@property
 	def loss_tokens(self):
-		return self.loss_mask.sum().item()
+		return self.loss_mask.sum()
 		
 	@property
 	def tokens(self):

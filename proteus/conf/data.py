@@ -31,7 +31,7 @@ class SmallSeqData(DefaultData):
 
 @dataclass
 class MediumSeqData(DefaultData):
-    batch_tokens: int = 16384
+    batch_tokens: int = 32768
     max_seq_size: int = 1024
 
 @dataclass

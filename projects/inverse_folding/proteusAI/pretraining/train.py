@@ -36,7 +36,8 @@ class proteusAIPretrainCfg(TrainingRunCfg):
 
 # everything is interpolated, can be more specific if you like
 D_MODEL = 512
-D_WF = 128
+D_WF = 256
+MIN_WL, MAX_WL, BASE_WL = 3.0, 15.0, 20.0
 HEADS = 16
 TRANSFORMER_LAYERS = 32
 MASK_RATE = 0.15
@@ -45,7 +46,12 @@ MASK_RATE = 0.15
 class SimpleModel(proteusAIPretrainCfg):
     model: proteusAICfg = field(default_factory=lambda: proteusAICfg(
         d_model=D_MODEL,
-        tokenizer=WaveFunctionTokenizerCfg(d_wf=D_WF),
+        tokenizer=WaveFunctionTokenizerCfg(
+            d_wf=D_WF, 
+            min_wl=MIN_WL, 
+            max_wl=MAX_WL, 
+            base_wl=BASE_WL
+        ),
         masker=MaskerCfg(mask_rate=MASK_RATE),
         transformer=TransformerModelCfg(
             transformer_block=TransformerBlockCfg(
